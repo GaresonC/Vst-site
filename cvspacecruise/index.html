@@ -72,7 +72,7 @@
     <button id="lvl1Btn" class="lvlBtn">LEVEL 1</button>
     <button id="lvl2Btn" class="lvlBtn">LEVEL 2</button>
   </div>
-  <p class="hint" id="hint"></p>
+  <p class="hint" id="hint">Drag the cable, steer the ship.</p>
   <canvas id="game" width="1300" height="980"></canvas>
 </div>
 <script>
@@ -86,23 +86,31 @@ const PANEL_H = H - GAME_H;
 // ---------- Level state ----------
 let level = 1;
 
-const HINTS = {
-  1: "Drag a cable from LFO OUT to one of the ship's two jacks. Only one cable exists — move it between AIM L/R and THRUSTER to steer. AIM L/R freezes at its last value when unpatched; THRUSTER (which can push forward or reverse) drops to zero the instant it's unpatched.",
-  2: "The STEP CONTROL module emits one voltage — the + and − buttons nudge it up or down a small step (watch the meter). Patch its single OUT cable into AIM L/R or THRUSTER to steer. AIM L/R holds its last value when you move the cable away; THRUSTER only pushes while patched.",
-};
-
-function updateHintText() {
-  document.getElementById('hint').textContent = HINTS[level];
-}
-
 function updateLevelButtons() {
   document.getElementById('lvl1Btn').classList.toggle('active', level === 1);
   document.getElementById('lvl2Btn').classList.toggle('active', level === 2);
 }
 
+const HINT = 'Drag the cable, steer the ship.';
+const HINT_NO_CABLE = HINT + ' (click and drag from OUT to get a cable)';
+
+// a cable is on screen while it's patched into a jack or held mid-drag
+function cableOnScreen() {
+  return level === 1
+    ? (connection !== null || dragging)
+    : (connection2 !== null || dragging2);
+}
+
+let hintShown = null;
+function updateHintText() {
+  const text = cableOnScreen() ? HINT : HINT_NO_CABLE;
+  if (text === hintShown) return;
+  document.getElementById('hint').textContent = text;
+  hintShown = text;
+}
+
 function setLevel(n) {
   level = n;
-  updateHintText();
   updateLevelButtons();
   restart();
 }
@@ -124,8 +132,8 @@ const STEP = 0.15;
 
 // ---------- Shared input jacks ----------
 const inputJacks = {
-  aimLR:  { x: 650, y: PANEL_Y0 + 160, r: 13, label: 'AIM L/R' },
-  thrust: { x: 950, y: PANEL_Y0 + 160, r: 13, label: 'THRUSTER' },
+  aimLR:  { x: 650, y: PANEL_Y0 + 160, r: 13, label: '← →' },
+  thrust: { x: 950, y: PANEL_Y0 + 160, r: 13, label: '↑ ↓' },
 };
 
 // ---------- Patch state (level 1) ----------
@@ -756,8 +764,10 @@ function drawInputJacks(highlight) {
     const active = highlight(key);
     drawJack(j, active);
     ctx.fillStyle = active ? '#9fe8c8' : '#6d7885';
-    ctx.font = '12px Courier New';
-    ctx.fillText(j.label, j.x - 30, j.y - 24);
+    ctx.font = '18px "Courier New", monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(j.label, j.x, j.y - 24);
+    ctx.textAlign = 'left';
   }
 }
 
@@ -776,7 +786,7 @@ function drawPanelLevel1() {
   ctx.strokeRect(30, PANEL_Y0 + 20, 240, PANEL_H - 40);
   ctx.fillStyle = '#8fa2b3';
   ctx.font = '13px Courier New';
-  ctx.fillText('SINE LFO', 45, PANEL_Y0 + 45);
+  ctx.fillText('THE SINE WAVE', 45, PANEL_Y0 + 45);
 
   // rate slider
   ctx.strokeStyle = '#3a434d';
@@ -792,7 +802,6 @@ function drawPanelLevel1() {
   ctx.fillStyle = '#6d7885';
   ctx.font = '11px Courier New';
   ctx.fillText('RATE', rateSlider.x0, rateSlider.y - 16);
-  ctx.fillText(currentRate().toFixed(2) + ' Hz', rateSlider.x0 + 90, rateSlider.y - 16);
 
   // lfo live value meter + out jack
   drawMeter(lfoOutJack.x - 45, PANEL_Y0 + 190, ship._lfoValue || 0, '');
@@ -931,6 +940,7 @@ function render() {
     drawTitle();
   }
   if (level === 1) drawPanelLevel1(); else drawPanelLevel2();
+  updateHintText();
 }
 
 function loop(now) {
@@ -941,7 +951,6 @@ function loop(now) {
   requestAnimationFrame(loop);
 }
 
-updateHintText();
 updateLevelButtons();
 restart();
 requestAnimationFrame(loop);

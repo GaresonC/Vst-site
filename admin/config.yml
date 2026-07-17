@@ -1,0 +1,39 @@
+# Decap CMS configuration
+# Docs: https://decapcms.org/docs/configuration-options/
+
+backend:
+  name: github
+  repo: GaresonC/Vst-site        # your GitHub repo (owner/name)
+  branch: main                   # branch uploads are committed to
+  # base_url is the address of your login worker (see SETUP-GALLERY.md, Step 2).
+  # After you deploy the Cloudflare Worker, replace the line below with its URL,
+  # e.g. base_url: https://mf-amp-oauth.your-name.workers.dev
+  base_url: REPLACE_WITH_YOUR_WORKER_URL
+
+# Where uploaded image files are stored in the repo...
+media_folder: "images/art"
+# ...and the URL path those images are served from on the live site.
+public_folder: "/images/art"
+
+# Nicer commit messages when you add/edit/delete artwork.
+site_url: https://gareson.com
+display_url: https://gareson.com
+publish_mode: simple
+
+collections:
+  - name: "artwork"
+    label: "Artwork"
+    label_singular: "Artwork"
+    folder: "content/art"        # each piece is one file here
+    create: true                 # allow adding new pieces
+    delete: true                 # allow removing pieces
+    extension: "json"            # store entries as JSON (easy for the gallery to read)
+    format: "json"
+    slug: "{{year}}-{{month}}-{{day}}-{{slug}}"
+    summary: "{{title}}"
+    sortable_fields: ["date", "title"]
+    fields:
+      - { label: "Title", name: "title", widget: "string" }
+      - { label: "Image", name: "image", widget: "image" }
+      - { label: "Description", name: "description", widget: "text", required: false }
+      - { label: "Date", name: "date", widget: "datetime", default: "", required: false }

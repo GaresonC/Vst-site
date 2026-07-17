@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Gallery &middot; MF AMP</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
+      background: #0a0a0a;
+      color: #e0e0e0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+
+    header {
+      text-align: center;
+      padding: 3rem 2rem 1.5rem;
+    }
+
+    h1 {
+      font-size: 2.5rem;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      color: #fff;
+    }
+
+    .tagline {
+      font-size: 1rem;
+      color: #888;
+      margin-top: 0.5rem;
+    }
+
+    main {
+      flex: 1;
+      width: 100%;
+      max-width: 1100px;
+      padding: 1.5rem 2rem 3rem;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+      gap: 1.25rem;
+    }
+
+    .card {
+      background: #141414;
+      border: 1px solid #222;
+      border-radius: 8px;
+      overflow: hidden;
+      transition: transform 0.2s, border-color 0.2s;
+    }
+
+    .card:hover {
+      transform: translateY(-2px);
+      border-color: #444;
+    }
+
+    .card img {
+      width: 100%;
+      height: 220px;
+      object-fit: cover;
+      display: block;
+      background: #1c1c1c;
+    }
+
+    .card .meta {
+      padding: 0.85rem 1rem;
+    }
+
+    .card .meta h3 {
+      font-size: 1rem;
+      font-weight: 600;
+      color: #fff;
+    }
+
+    .card .meta p {
+      font-size: 0.85rem;
+      line-height: 1.5;
+      color: #999;
+      margin-top: 0.35rem;
+    }
+
+    .status {
+      text-align: center;
+      color: #666;
+      font-size: 0.95rem;
+      padding: 4rem 1rem;
+    }
+
+    footer {
+      padding: 2rem;
+      font-size: 0.75rem;
+      color: #444;
+    }
+
+    footer a { color: #666; text-decoration: none; }
+    footer a:hover { color: #aaa; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Gallery</h1>
+    <p class="tagline">Art by Gareson</p>
+  </header>
+
+  <main>
+    <div id="grid" class="grid" hidden></div>
+    <p id="status" class="status">Loading&hellip;</p>
+  </main>
+
+  <footer>
+    <a href="/">&larr; Home</a>
+    &middot;
+    <a href="https://github.com/GaresonC">GitHub</a>
+  </footer>
+
+  <script>
+    // Reads artwork entries committed by the admin (Decap CMS) straight from
+    // the GitHub repo — no server, no build step. Public repo, so no login needed.
+    const REPO = 'GaresonC/Vst-site';
+    const BRANCH = 'main';
+    const CONTENT_PATH = 'content/art';
+
+    const gridEl = document.getElementById('grid');
+    const statusEl = document.getElementById('status');
+
+    function esc(s) {
+      return String(s == null ? '' : s).replace(/[&<>"']/g, c => (
+        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+      ));
+    }
+
+    async function load() {
+      try {
+        const listUrl =
+          `https://api.github.com/repos/${REPO}/contents/${CONTENT_PATH}?ref=${BRANCH}`;
+        const res = await fetch(listUrl);
+
+        // 404 = folder doesn't exist yet (nothing uploaded). Show friendly note.
+        if (res.status === 404) return showEmpty();
+        if (!res.ok) throw new Error('GitHub API error ' + res.status);
+
+        const files = await res.json();
+        const jsonFiles = files.filter(f => f.type === 'file' && f.name.endsWith('.json'));
+
+        if (jsonFiles.length === 0) return showEmpty();
+
+        // Fetch each entry's JSON (title, image, description, date).
+        const items = await Promise.all(jsonFiles.map(async f => {
+          const r = await fetch(f.download_url);
+          const data = await r.json();
+          return data;
+        }));
+
+        // Newest first when a date is present.
+        items.sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+
+        render(items.filter(it => it && it.image));
+      } catch (err) {
+        console.error(err);
+        statusEl.textContent =
+          'Could not load the gallery right now. Please try again in a minute.';
+      }
+    }
+
+    function showEmpty() {
+      statusEl.innerHTML =
+        'No artwork here yet &mdash; check back soon.';
+    }
+
+    function render(items) {
+      if (items.length === 0) return showEmpty();
+      gridEl.innerHTML = items.map(it => `
+        <div class="card">
+          <img src="${esc(it.image)}" alt="${esc(it.title)}" loading="lazy">
+          <div class="meta">
+            <h3>${esc(it.title)}</h3>
+            ${it.description ? `<p>${esc(it.description)}</p>` : ''}
+          </div>
+        </div>
+      `).join('');
+      statusEl.hidden = true;
+      gridEl.hidden = false;
+    }
+
+    load();
+  </script>
+</body>
+</html>

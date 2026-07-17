@@ -40,12 +40,39 @@
     max-width: 1200px;
     text-align: center;
   }
+  #levelTabs {
+    display: flex;
+    gap: 8px;
+  }
+  .lvlBtn {
+    font-family: 'Courier New', monospace;
+    font-size: 12px;
+    letter-spacing: 1px;
+    background: #10141a;
+    color: #6d7885;
+    border: 1px solid #2a323b;
+    padding: 5px 14px;
+    cursor: pointer;
+  }
+  .lvlBtn:hover {
+    color: #9fb3c8;
+    border-color: #3a434d;
+  }
+  .lvlBtn.active {
+    color: #9fe8c8;
+    border-color: #5fd6a8;
+    background: #10201a;
+  }
 </style>
 </head>
 <body>
 <div id="wrap">
   <h1>CONTROL VOLTAGE THRUSTER — PROOF OF CONCEPT</h1>
-  <p class="hint">Drag a cable from LFO OUT to one of the ship's two jacks. Only one cable exists — move it between AIM L/R and THRUSTER to steer. AIM L/R freezes at its last value when unpatched; THRUSTER (which can push forward or reverse) drops to zero the instant it's unpatched.</p>
+  <div id="levelTabs">
+    <button id="lvl1Btn" class="lvlBtn">LEVEL 1</button>
+    <button id="lvl2Btn" class="lvlBtn">LEVEL 2</button>
+  </div>
+  <p class="hint" id="hint"></p>
   <canvas id="game" width="1300" height="980"></canvas>
 </div>
 <script>
@@ -56,17 +83,52 @@ const GAME_H = 760;
 const PANEL_Y0 = GAME_H;
 const PANEL_H = H - GAME_H;
 
-// ---------- Jack layout ----------
+// ---------- Level state ----------
+let level = 1;
+
+const HINTS = {
+  1: "Drag a cable from LFO OUT to one of the ship's two jacks. Only one cable exists — move it between AIM L/R and THRUSTER to steer. AIM L/R freezes at its last value when unpatched; THRUSTER (which can push forward or reverse) drops to zero the instant it's unpatched.",
+  2: "The STEP CONTROL module emits one voltage — the + and − buttons nudge it up or down a small step (watch the meter). Patch its single OUT cable into AIM L/R or THRUSTER to steer. AIM L/R holds its last value when you move the cable away; THRUSTER only pushes while patched.",
+};
+
+function updateHintText() {
+  document.getElementById('hint').textContent = HINTS[level];
+}
+
+function updateLevelButtons() {
+  document.getElementById('lvl1Btn').classList.toggle('active', level === 1);
+  document.getElementById('lvl2Btn').classList.toggle('active', level === 2);
+}
+
+function setLevel(n) {
+  level = n;
+  updateHintText();
+  updateLevelButtons();
+  restart();
+}
+
+document.getElementById('lvl1Btn').addEventListener('click', () => setLevel(1));
+document.getElementById('lvl2Btn').addEventListener('click', () => setLevel(2));
+
+// ---------- Jack layout (level 1: LFO) ----------
 const lfoOutJack = { x: 150, y: PANEL_Y0 + 160, r: 13 };
 const rateSlider = { x0: 60, x1: 240, y: PANEL_Y0 + 90, handle: 0.35 }; // handle: 0..1 position
 const RATE_MIN = 0.05, RATE_MAX = 1.0;
 
+// ---------- Jack layout (level 2: step buttons) ----------
+// One module output; the + / − buttons raise/lower the single voltage it emits.
+const plusButton = { x0: 50, y0: PANEL_Y0 + 55, x1: 145, y1: PANEL_Y0 + 95 };
+const minusButton = { x0: 155, y0: PANEL_Y0 + 55, x1: 250, y1: PANEL_Y0 + 95 };
+const stepOutJack = { x: 205, y: PANEL_Y0 + 160, r: 13 };
+const STEP = 0.15;
+
+// ---------- Shared input jacks ----------
 const inputJacks = {
   aimLR:  { x: 650, y: PANEL_Y0 + 160, r: 13, label: 'AIM L/R' },
   thrust: { x: 950, y: PANEL_Y0 + 160, r: 13, label: 'THRUSTER' },
 };
 
-// ---------- Patch state ----------
+// ---------- Patch state (level 1) ----------
 let connection = null; // 'aimLR' | 'thrust' | null
 let dragging = false;
 let dragPos = { x: 0, y: 0 };
@@ -82,6 +144,14 @@ function currentRate() {
   return RATE_MIN + rateSlider.handle * (RATE_MAX - RATE_MIN);
 }
 
+// ---------- Patch state (level 2) ----------
+let connection2 = null; // 'aimLR' | 'thrust' | null — single cable, like level 1
+let dragging2 = false;
+let dragPos2 = { x: 0, y: 0 };
+
+// the module's single output voltage, nudged by the + / − buttons (signed -1..1)
+let stepVoltage = 0;
+
 // ---------- Ship state ----------
 const ship = {
   x: W / 2, y: GAME_H / 2, vx: 0, vy: 0, r: 16,
@@ -94,7 +164,20 @@ const SHIP_START = { x: W / 2, y: GAME_H - 60 };
 
 function resetShip() {
   ship.x = SHIP_START.x; ship.y = SHIP_START.y; ship.vx = 0; ship.vy = 0;
-  aimLR = 0; connection = null;
+}
+
+function resetLevel1Controls() {
+  aimLR = 0;
+  connection = null;
+  dragging = false;
+  draggingRate = false;
+}
+
+function resetLevel2Controls() {
+  aimLR = 0;
+  stepVoltage = 0;
+  connection2 = 'aimLR'; // start with the cable already patched into AIM L/R
+  dragging2 = false;
 }
 
 // ---------- Asteroid field + goal (static layout, regenerated each run) ----------
@@ -151,6 +234,7 @@ function restart() {
   elapsed = 0;
   finished = null;
   resetShip();
+  if (level === 1) resetLevel1Controls(); else resetLevel2Controls();
   generateField();
 }
 
@@ -167,52 +251,97 @@ function dist(ax, ay, bx, by) {
   return Math.hypot(ax - bx, ay - by);
 }
 
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+function pointInRect(p, r) {
+  return p.x >= r.x0 && p.x <= r.x1 && p.y >= r.y0 && p.y <= r.y1;
+}
+
 canvas.addEventListener('mousedown', (e) => {
   const p = getMousePos(e);
 
   if (finished) {
-    restart();
+    if (finished === 'goal' && level === 1) {
+      setLevel(2);
+    } else {
+      restart();
+    }
     return;
   }
 
-  // rate slider handle
-  const handleX = rateSlider.x0 + rateSlider.handle * (rateSlider.x1 - rateSlider.x0);
-  if (Math.abs(p.x - handleX) < 12 && Math.abs(p.y - rateSlider.y) < 12) {
-    draggingRate = true;
-    return;
-  }
+  if (level === 1) {
+    // rate slider handle
+    const handleX = rateSlider.x0 + rateSlider.handle * (rateSlider.x1 - rateSlider.x0);
+    if (Math.abs(p.x - handleX) < 12 && Math.abs(p.y - rateSlider.y) < 12) {
+      draggingRate = true;
+      return;
+    }
 
-  // grab from LFO out jack
-  if (dist(p.x, p.y, lfoOutJack.x, lfoOutJack.y) < lfoOutJack.r + 6) {
-    dragging = true;
-    dragPos = p;
-    connection = null; // picking up detaches current connection
-    return;
-  }
+    // grab from LFO out jack
+    if (dist(p.x, p.y, lfoOutJack.x, lfoOutJack.y) < lfoOutJack.r + 6) {
+      dragging = true;
+      dragPos = p;
+      connection = null; // picking up detaches current connection
+      return;
+    }
 
-  // grab existing cable at its connected jack
-  if (connection && dist(p.x, p.y, inputJacks[connection].x, inputJacks[connection].y) < inputJacks[connection].r + 6) {
-    dragging = true;
-    dragPos = p;
-    connection = null;
-    return;
+    // grab existing cable at its connected jack
+    if (connection && dist(p.x, p.y, inputJacks[connection].x, inputJacks[connection].y) < inputJacks[connection].r + 6) {
+      dragging = true;
+      dragPos = p;
+      connection = null;
+      return;
+    }
+  } else {
+    // step buttons raise/lower the module's single output voltage
+    if (pointInRect(p, plusButton)) {
+      stepVoltage = clamp(stepVoltage + STEP, -1, 1);
+      return;
+    }
+    if (pointInRect(p, minusButton)) {
+      stepVoltage = clamp(stepVoltage - STEP, -1, 1);
+      return;
+    }
+
+    // grab from the module out jack
+    if (dist(p.x, p.y, stepOutJack.x, stepOutJack.y) < stepOutJack.r + 6) {
+      dragging2 = true;
+      dragPos2 = p;
+      connection2 = null; // picking up detaches current connection
+      return;
+    }
+
+    // grab the existing cable at its connected input jack
+    if (connection2 && dist(p.x, p.y, inputJacks[connection2].x, inputJacks[connection2].y) < inputJacks[connection2].r + 6) {
+      dragging2 = true;
+      dragPos2 = p;
+      connection2 = null;
+      return;
+    }
   }
 });
 
 canvas.addEventListener('mousemove', (e) => {
   const p = getMousePos(e);
-  if (draggingRate) {
-    let t = (p.x - rateSlider.x0) / (rateSlider.x1 - rateSlider.x0);
-    rateSlider.handle = Math.max(0, Math.min(1, t));
-  }
-  if (dragging) {
-    dragPos = p;
+  if (level === 1) {
+    if (draggingRate) {
+      let t = (p.x - rateSlider.x0) / (rateSlider.x1 - rateSlider.x0);
+      rateSlider.handle = Math.max(0, Math.min(1, t));
+    }
+    if (dragging) {
+      dragPos = p;
+    }
+  } else {
+    if (dragging2) {
+      dragPos2 = p;
+    }
   }
 });
 
 window.addEventListener('mouseup', (e) => {
+  const p = getMousePos(e);
+
   if (dragging) {
-    const p = getMousePos(e);
     let landed = null;
     for (const key in inputJacks) {
       const j = inputJacks[key];
@@ -222,26 +351,23 @@ window.addEventListener('mouseup', (e) => {
     dragging = false;
   }
   draggingRate = false;
+
+  if (dragging2) {
+    let landed = null;
+    for (const key in inputJacks) {
+      const j = inputJacks[key];
+      if (dist(p.x, p.y, j.x, j.y) < j.r + 10) { landed = key; break; }
+    }
+    connection2 = landed;
+    dragging2 = false;
+  }
 });
 
 // ---------- Physics ----------
-function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
-
-function step(dt) {
-  if (finished) return;
-
-  elapsed += dt;
-
-  lfoPhase += currentRate() * dt * Math.PI * 2;
-  const lfoValue = Math.sin(lfoPhase);
-
-  if (connection === 'aimLR') aimLR = lfoValue;
-  // signed: -1..1, negative fires the thruster in reverse
-  const thrustMag = connection === 'thrust' ? lfoValue : 0;
-
+function applyForces(dt, aimVal, thrustMag) {
   // flame direction (points "away" from ship, thrust pushes opposite); gimbal only
   // sweeps left/right now, always keeping a fixed downward component
-  let fx = aimLR * AIM_MAX;
+  let fx = aimVal * AIM_MAX;
   let fy = 1;
   const flen = Math.hypot(fx, fy) || 1;
   fx /= flen; fy /= flen;
@@ -259,6 +385,13 @@ function step(dt) {
   ship.x += ship.vx * dt;
   ship.y += ship.vy * dt;
 
+  // stash last computed thrust visuals for drawing
+  ship._flameX = fx;
+  ship._flameY = fy;
+  ship._thrustMag = thrustMag;
+}
+
+function updateWorldCommon(dt) {
   // bounds
   if (ship.x < ship.r) { ship.x = ship.r; ship.vx = Math.max(0, ship.vx); }
   if (ship.x > W - ship.r) { ship.x = W - ship.r; ship.vx = Math.min(0, ship.vx); }
@@ -280,12 +413,32 @@ function step(dt) {
   if (!finished && dist(ship.x, ship.y, goal.x, goal.y) < ship.r + goal.r) {
     finished = 'goal';
   }
+}
 
-  // stash last computed thrust visuals for drawing
-  ship._flameX = fx;
-  ship._flameY = fy;
-  ship._thrustMag = thrustMag;
-  ship._lfoValue = lfoValue;
+function step(dt) {
+  if (finished) return;
+  elapsed += dt;
+
+  if (level === 1) {
+    lfoPhase += currentRate() * dt * Math.PI * 2;
+    const lfoValue = Math.sin(lfoPhase);
+
+    if (connection === 'aimLR') aimLR = lfoValue;
+    // signed: -1..1, negative fires the thruster in reverse
+    const thrustMag = connection === 'thrust' ? lfoValue : 0;
+
+    applyForces(dt, aimLR, thrustMag);
+    ship._lfoValue = lfoValue;
+  } else {
+    // single output voltage drives whichever input the one cable is patched to;
+    // aim holds its last value when the cable moves away (same as level 1)
+    if (connection2 === 'aimLR') aimLR = stepVoltage;
+    const thrustMag = connection2 === 'thrust' ? stepVoltage : 0;
+
+    applyForces(dt, aimLR, thrustMag);
+  }
+
+  updateWorldCommon(dt);
 }
 
 // ---------- Drawing ----------
@@ -432,7 +585,41 @@ function drawMeter(x, y, value01, label) {
   ctx.fillRect(x - w / 2, y - fillH, w, fillH);
 }
 
-function drawPanel() {
+function drawCable(x0, y0, x1, y1) {
+  ctx.beginPath();
+  ctx.moveTo(x0, y0);
+  const midY = (y0 + y1) / 2 + 30;
+  ctx.bezierCurveTo(x0, midY, x1, midY, x1, y1);
+  ctx.stroke();
+}
+
+function drawStepButton(btn, label, active) {
+  ctx.fillStyle = active ? '#1d2b24' : '#151a20';
+  ctx.strokeStyle = active ? '#5fd6a8' : '#3a434d';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.rect(btn.x0, btn.y0, btn.x1 - btn.x0, btn.y1 - btn.y0);
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = '#cfd6de';
+  ctx.font = '22px Courier New';
+  ctx.textAlign = 'center';
+  ctx.fillText(label, (btn.x0 + btn.x1) / 2, (btn.y0 + btn.y1) / 2 + 8);
+  ctx.textAlign = 'left';
+}
+
+function drawInputJacks(highlight) {
+  for (const key in inputJacks) {
+    const j = inputJacks[key];
+    const active = highlight(key);
+    drawJack(j, active);
+    ctx.fillStyle = active ? '#9fe8c8' : '#6d7885';
+    ctx.font = '12px Courier New';
+    ctx.fillText(j.label, j.x - 30, j.y - 24);
+  }
+}
+
+function drawPanelLevel1() {
   ctx.save();
   ctx.fillStyle = '#0c0f13';
   ctx.fillRect(0, PANEL_Y0, W, PANEL_H);
@@ -472,13 +659,7 @@ function drawPanel() {
   ctx.fillText('OUT', lfoOutJack.x - 12, PANEL_Y0 + 195);
 
   // input jacks
-  for (const key in inputJacks) {
-    const j = inputJacks[key];
-    drawJack(j, connection === key);
-    ctx.fillStyle = connection === key ? '#9fe8c8' : '#6d7885';
-    ctx.font = '12px Courier New';
-    ctx.fillText(j.label, j.x - 30, j.y - 24);
-  }
+  drawInputJacks((key) => connection === key);
   drawMeter(inputJacks.aimLR.x - 45, PANEL_Y0 + 190, aimLR, '');
   drawMeter(inputJacks.thrust.x - 45, PANEL_Y0 + 190, (connection === 'thrust' ? (ship._lfoValue || 0) : -1), '');
 
@@ -497,18 +678,62 @@ function drawPanel() {
   ctx.restore();
 }
 
-function drawCable(x0, y0, x1, y1) {
+function drawPanelLevel2() {
+  ctx.save();
+  ctx.fillStyle = '#0c0f13';
+  ctx.fillRect(0, PANEL_Y0, W, PANEL_H);
+  ctx.strokeStyle = '#22282f';
   ctx.beginPath();
-  ctx.moveTo(x0, y0);
-  const midY = (y0 + y1) / 2 + 30;
-  ctx.bezierCurveTo(x0, midY, x1, midY, x1, y1);
+  ctx.moveTo(0, PANEL_Y0);
+  ctx.lineTo(W, PANEL_Y0);
   ctx.stroke();
+
+  // step control module box
+  ctx.strokeStyle = '#2a323b';
+  ctx.strokeRect(30, PANEL_Y0 + 20, 240, PANEL_H - 40);
+  ctx.fillStyle = '#8fa2b3';
+  ctx.font = '13px Courier New';
+  ctx.fillText('STEP CONTROL', 45, PANEL_Y0 + 45);
+
+  drawStepButton(plusButton, '+', false);
+  drawStepButton(minusButton, '−', false);
+
+  // single voltage meter for the module's output, plus its readout
+  drawMeter(stepOutJack.x - 45, PANEL_Y0 + 190, stepVoltage, '');
+  ctx.fillStyle = '#6d7885';
+  ctx.font = '11px Courier New';
+  ctx.fillText(stepVoltage.toFixed(2) + ' V', 45, PANEL_Y0 + 130);
+
+  // module out jack
+  drawJack(stepOutJack, connection2 !== null || dragging2);
+  ctx.fillStyle = '#6d7885';
+  ctx.fillText('OUT', stepOutJack.x - 12, stepOutJack.y + 28);
+
+  // input jacks (no per-input meters now)
+  drawInputJacks((key) => connection2 === key);
+
+  // single cable
+  ctx.lineWidth = 4;
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = '#4a9dd6';
+  if (connection2) {
+    const j = inputJacks[connection2];
+    drawCable(stepOutJack.x, stepOutJack.y, j.x, j.y);
+  }
+  if (dragging2) {
+    drawCable(stepOutJack.x, stepOutJack.y, dragPos2.x, dragPos2.y);
+  }
+
+  ctx.restore();
 }
 
 function drawHUD() {
   ctx.fillStyle = '#cfd6de';
   ctx.font = '16px Courier New';
   ctx.fillText('TIME: ' + elapsed.toFixed(1) + 's', 16, 26);
+  ctx.textAlign = 'right';
+  ctx.fillText('LEVEL ' + level, W - 16, 26);
+  ctx.textAlign = 'left';
 
   if (finished) {
     const win = finished === 'goal';
@@ -520,7 +745,10 @@ function drawHUD() {
     ctx.fillText(win ? 'GOAL REACHED' : 'CRASHED', W / 2, GAME_H / 2 - 10);
     ctx.font = '16px Courier New';
     ctx.fillStyle = '#cfd6de';
-    ctx.fillText('Time ' + elapsed.toFixed(1) + 's — click for a new field', W / 2, GAME_H / 2 + 20);
+    const nextMsg = (win && level === 1)
+      ? 'Time ' + elapsed.toFixed(1) + 's — click for LEVEL 2'
+      : 'Time ' + elapsed.toFixed(1) + 's — click for a new field';
+    ctx.fillText(nextMsg, W / 2, GAME_H / 2 + 20);
     ctx.textAlign = 'left';
   }
 }
@@ -534,7 +762,7 @@ function render() {
   drawAsteroids();
   drawShip();
   drawHUD();
-  drawPanel();
+  if (level === 1) drawPanelLevel1(); else drawPanelLevel2();
 }
 
 function loop(now) {
@@ -545,6 +773,8 @@ function loop(now) {
   requestAnimationFrame(loop);
 }
 
+updateHintText();
+updateLevelButtons();
 restart();
 requestAnimationFrame(loop);
 </script>

@@ -1,0 +1,950 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>CV SPACE CRUISE (proof of concept)</title>
+<style>
+  html, body {
+    margin: 0;
+    background: #05070a;
+    color: #cfd6de;
+    font-family: 'Courier New', monospace;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+  }
+  #wrap {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+  }
+  canvas {
+    background: #000;
+    display: block;
+    cursor: default;
+    border: 1px solid #222;
+  }
+  h1 {
+    font-size: 15px;
+    letter-spacing: 2px;
+    color: #8fa2b3;
+    font-weight: normal;
+    margin: 6px 0 0 0;
+  }
+  p.hint {
+    font-size: 12px;
+    color: #556170;
+    margin: 0 0 6px 0;
+    max-width: 1200px;
+    text-align: center;
+  }
+  #levelTabs {
+    display: flex;
+    gap: 8px;
+  }
+  .lvlBtn {
+    font-family: 'Courier New', monospace;
+    font-size: 12px;
+    letter-spacing: 1px;
+    background: #10141a;
+    color: #6d7885;
+    border: 1px solid #2a323b;
+    padding: 5px 14px;
+    cursor: pointer;
+  }
+  .lvlBtn:hover {
+    color: #9fb3c8;
+    border-color: #3a434d;
+  }
+  .lvlBtn.active {
+    color: #9fe8c8;
+    border-color: #5fd6a8;
+    background: #10201a;
+  }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <h1>CV SPACE CRUISE (proof of concept)</h1>
+  <div id="levelTabs">
+    <button id="lvl1Btn" class="lvlBtn">LEVEL 1</button>
+    <button id="lvl2Btn" class="lvlBtn">LEVEL 2</button>
+  </div>
+  <p class="hint" id="hint"></p>
+  <canvas id="game" width="1300" height="980"></canvas>
+</div>
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+const GAME_H = 760;
+const PANEL_Y0 = GAME_H;
+const PANEL_H = H - GAME_H;
+
+// ---------- Level state ----------
+let level = 1;
+
+const HINTS = {
+  1: "Drag a cable from LFO OUT to one of the ship's two jacks. Only one cable exists — move it between AIM L/R and THRUSTER to steer. AIM L/R freezes at its last value when unpatched; THRUSTER (which can push forward or reverse) drops to zero the instant it's unpatched.",
+  2: "The STEP CONTROL module emits one voltage — the + and − buttons nudge it up or down a small step (watch the meter). Patch its single OUT cable into AIM L/R or THRUSTER to steer. AIM L/R holds its last value when you move the cable away; THRUSTER only pushes while patched.",
+};
+
+function updateHintText() {
+  document.getElementById('hint').textContent = HINTS[level];
+}
+
+function updateLevelButtons() {
+  document.getElementById('lvl1Btn').classList.toggle('active', level === 1);
+  document.getElementById('lvl2Btn').classList.toggle('active', level === 2);
+}
+
+function setLevel(n) {
+  level = n;
+  updateHintText();
+  updateLevelButtons();
+  restart();
+}
+
+document.getElementById('lvl1Btn').addEventListener('click', () => setLevel(1));
+document.getElementById('lvl2Btn').addEventListener('click', () => setLevel(2));
+
+// ---------- Jack layout (level 1: LFO) ----------
+const lfoOutJack = { x: 150, y: PANEL_Y0 + 160, r: 13 };
+const rateSlider = { x0: 60, x1: 240, y: PANEL_Y0 + 90, handle: 0.35 }; // handle: 0..1 position
+const RATE_MIN = 0.05, RATE_MAX = 1.0;
+
+// ---------- Jack layout (level 2: step buttons) ----------
+// One module output; the + / − buttons raise/lower the single voltage it emits.
+const plusButton = { x0: 50, y0: PANEL_Y0 + 55, x1: 145, y1: PANEL_Y0 + 95 };
+const minusButton = { x0: 155, y0: PANEL_Y0 + 55, x1: 250, y1: PANEL_Y0 + 95 };
+const stepOutJack = { x: 205, y: PANEL_Y0 + 160, r: 13 };
+const STEP = 0.15;
+
+// ---------- Shared input jacks ----------
+const inputJacks = {
+  aimLR:  { x: 650, y: PANEL_Y0 + 160, r: 13, label: 'AIM L/R' },
+  thrust: { x: 950, y: PANEL_Y0 + 160, r: 13, label: 'THRUSTER' },
+};
+
+// ---------- Patch state (level 1) ----------
+let connection = null; // 'aimLR' | 'thrust' | null
+let dragging = false;
+let dragPos = { x: 0, y: 0 };
+let draggingRate = false;
+
+// persistent held value (aim holds its last value; thrust is recomputed fresh every
+// frame — signed -1..1, negative = reverse thrust)
+let aimLR = 0;
+
+let lfoPhase = 0;
+
+function currentRate() {
+  return RATE_MIN + rateSlider.handle * (RATE_MAX - RATE_MIN);
+}
+
+// ---------- Patch state (level 2) ----------
+let connection2 = null; // 'aimLR' | 'thrust' | null — single cable, like level 1
+let dragging2 = false;
+let dragPos2 = { x: 0, y: 0 };
+
+// the module's single output voltage, nudged by the + / − buttons (signed -1..1)
+let stepVoltage = 0;
+
+// ---------- Ship state ----------
+// r is a visual anchor only — it places the flame at the engine and sizes the
+// gimbal indicator. Collision uses SHIP_HIT, which follows the sprite's outline.
+const ship = {
+  x: W / 2, y: GAME_H / 2, vx: 0, vy: 0, r: 16,
+};
+const FORCE_SCALE = 260;
+const DRAG = 0.6; // linear damping coefficient
+const AIM_MAX = 1.0;
+
+const SHIP_START = { x: W / 2, y: GAME_H - 60 };
+
+function resetShip() {
+  ship.x = SHIP_START.x; ship.y = SHIP_START.y; ship.vx = 0; ship.vy = 0;
+}
+
+function resetLevel1Controls() {
+  aimLR = 0;
+  connection = null;
+  dragging = false;
+  draggingRate = false;
+}
+
+function resetLevel2Controls() {
+  aimLR = 0;
+  stepVoltage = 0;
+  connection2 = 'aimLR'; // start with the cable already patched into AIM L/R
+  dragging2 = false;
+}
+
+// ---------- Asteroid field + goal (static layout, regenerated each run) ----------
+let asteroids = [];
+const goal = { x: W / 2, y: 70, r: 22 };
+
+function generateField() {
+  goal.x = 110 + Math.random() * (W - 220);
+  goal.y = 65;
+
+  asteroids = [];
+  const count = 26;
+  let attempts = 0;
+  while (asteroids.length < count && attempts < 500) {
+    attempts++;
+    const r = 14 + Math.random() * 24;
+    const x = r + Math.random() * (W - 2 * r);
+    const y = 130 + Math.random() * (GAME_H - 130 - 130);
+
+    if (dist(x, y, SHIP_START.x, SHIP_START.y) < r + 90) continue;
+    if (dist(x, y, goal.x, goal.y) < r + 90) continue;
+
+    let overlaps = false;
+    for (const a of asteroids) {
+      if (dist(x, y, a.x, a.y) < r + a.r + 20) { overlaps = true; break; }
+    }
+    if (overlaps) continue;
+
+    // crop is stored normalised (0..1) because the source images may not have
+    // loaded yet when the field is generated
+    const cs = SLICE_MIN + Math.random() * (SLICE_MAX - SLICE_MIN);
+    asteroids.push({
+      x, y, r,
+      rot: Math.random() * Math.PI * 2,
+      vrot: (Math.random() - 0.5) * 0.7,
+      tex: Math.floor(Math.random() * texImgs.length),
+      cs,
+      cu: Math.random() * (1 - cs),
+      cv: Math.random() * (1 - cs),
+    });
+  }
+}
+
+// ---------- Art assets ----------
+// Both sprites are 896x896. The ship's opaque pixels occupy a 776x726 box centred
+// in that square, so scaling off the full image keeps it centred on ship.x/y.
+const shipImg = new Image();
+shipImg.src = 'assets/ship.png';
+const spaceImg = new Image();
+spaceImg.src = 'assets/space.png';
+const titleImg = new Image();
+titleImg.src = 'assets/title.jpg';
+
+// Asteroid texture sources. Each rock clips a random slice of one of these to its
+// polygon silhouette, so every asteroid is unique per run without hand-drawn art.
+const texImgs = ['brine.jpg', 'greed.jpg', 'leftleg.jpg', 'fish.jpg', 'steve.jpg'].map(f => {
+  const im = new Image();
+  im.src = 'assets/tex/' + f;
+  return im;
+});
+
+// Slice size as a fraction of the source image's smaller side. Tuned by eye: small
+// slices land on flat regions (card borders, water) and read as anonymous coloured
+// gems, so these are deliberately large enough to catch a whole feature.
+const SLICE_MIN = 0.45, SLICE_MAX = 0.75;
+
+let SHIP_CONTENT_H = 42;                            // on-screen height of the hull
+let SHIP_DRAW = SHIP_CONTENT_H * 896 / 726;         // full-image size that yields it
+
+// the art is near-black on a near-black nebula, so it needs help to read.
+// 'glow' = rim light, 'bright' = lift the sprite's own values, 'none' = raw art.
+let SHIP_LIFT = 'bright';
+
+let SHOW_HITBOX = false;
+
+// Collision shape, measured off the sprite's alpha channel. The hull is a narrow
+// fuselage (half-width ~7.3) with thin swept wings that only exist below the
+// midline, so a single circle either ignores the wings or invents collisions in
+// the empty upper corners. Offsets/radii are in game px at HIT_REF_H and scale
+// with SHIP_CONTENT_H. Only the right wing is listed; the left is mirrored.
+const HIT_REF_H = 42;
+const SHIP_HIT_BASE = [
+  { x: 0,    y: -13.5, r: 6.8 },
+  { x: 0,    y: -6,    r: 7.3 },
+  { x: 0,    y: 1,     r: 7.3 },
+  { x: 0,    y: 8,     r: 7.6 },
+  { x: 0,    y: 14,    r: 6.5 },
+  { x: 9.5,  y: 12.4,  r: 4.3 },
+  { x: 13,   y: 14.2,  r: 3.3 },
+  { x: 16.5, y: 16.2,  r: 2.6 },
+  { x: 20,   y: 18.2,  r: 1.9 },
+  { x: 22,   y: 19.4,  r: 1.5 },
+];
+const SHIP_HIT = SHIP_HIT_BASE.concat(
+  SHIP_HIT_BASE.filter(c => c.x > 0).map(c => ({ x: -c.x, y: c.y, r: c.r }))
+);
+
+// asteroids draw as spiky polygons whose points ride between 0.8 and 1.05 of a.r,
+// so collide against their average silhouette rather than the bounding radius
+const ASTEROID_HIT_SCALE = 0.9;
+
+function hitScale() { return SHIP_CONTENT_H / HIT_REF_H; }
+
+// true when any part of the hull overlaps the given circle
+function shipOverlaps(cx, cy, cr) {
+  const k = hitScale();
+  for (const c of SHIP_HIT) {
+    if (dist(ship.x + c.x * k, ship.y + c.y * k, cx, cy) < cr + c.r * k) return true;
+  }
+  return false;
+}
+
+// ---------- Stars ----------
+const stars = [];
+for (let i = 0; i < 70; i++) {
+  stars.push({
+    x: Math.random() * W,
+    y: Math.random() * GAME_H,
+    r: 1 + Math.random() * 2.4,
+    a: 0.2 + Math.random() * 0.5,
+  });
+}
+
+// ---------- Game state ----------
+let started = false; // title screen until the player clicks in
+let finished = null; // null | 'crashed' | 'goal'
+let elapsed = 0;
+let lastTime = performance.now();
+
+function restart() {
+  elapsed = 0;
+  finished = null;
+  resetShip();
+  if (level === 1) resetLevel1Controls(); else resetLevel2Controls();
+  generateField();
+}
+
+// ---------- Input handling ----------
+function getMousePos(evt) {
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: (evt.clientX - rect.left) * (canvas.width / rect.width),
+    y: (evt.clientY - rect.top) * (canvas.height / rect.height),
+  };
+}
+
+function dist(ax, ay, bx, by) {
+  return Math.hypot(ax - bx, ay - by);
+}
+
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+function pointInRect(p, r) {
+  return p.x >= r.x0 && p.x <= r.x1 && p.y >= r.y0 && p.y <= r.y1;
+}
+
+canvas.addEventListener('mousedown', (e) => {
+  const p = getMousePos(e);
+
+  if (!started) {
+    started = true;
+    restart();
+    return;
+  }
+
+  if (finished) {
+    if (finished === 'goal' && level === 1) {
+      setLevel(2);
+    } else {
+      restart();
+    }
+    return;
+  }
+
+  if (level === 1) {
+    // rate slider handle
+    const handleX = rateSlider.x0 + rateSlider.handle * (rateSlider.x1 - rateSlider.x0);
+    if (Math.abs(p.x - handleX) < 12 && Math.abs(p.y - rateSlider.y) < 12) {
+      draggingRate = true;
+      return;
+    }
+
+    // grab from LFO out jack
+    if (dist(p.x, p.y, lfoOutJack.x, lfoOutJack.y) < lfoOutJack.r + 6) {
+      dragging = true;
+      dragPos = p;
+      connection = null; // picking up detaches current connection
+      return;
+    }
+
+    // grab existing cable at its connected jack
+    if (connection && dist(p.x, p.y, inputJacks[connection].x, inputJacks[connection].y) < inputJacks[connection].r + 6) {
+      dragging = true;
+      dragPos = p;
+      connection = null;
+      return;
+    }
+  } else {
+    // step buttons raise/lower the module's single output voltage
+    if (pointInRect(p, plusButton)) {
+      stepVoltage = clamp(stepVoltage + STEP, -1, 1);
+      return;
+    }
+    if (pointInRect(p, minusButton)) {
+      stepVoltage = clamp(stepVoltage - STEP, -1, 1);
+      return;
+    }
+
+    // grab from the module out jack
+    if (dist(p.x, p.y, stepOutJack.x, stepOutJack.y) < stepOutJack.r + 6) {
+      dragging2 = true;
+      dragPos2 = p;
+      connection2 = null; // picking up detaches current connection
+      return;
+    }
+
+    // grab the existing cable at its connected input jack
+    if (connection2 && dist(p.x, p.y, inputJacks[connection2].x, inputJacks[connection2].y) < inputJacks[connection2].r + 6) {
+      dragging2 = true;
+      dragPos2 = p;
+      connection2 = null;
+      return;
+    }
+  }
+});
+
+canvas.addEventListener('mousemove', (e) => {
+  const p = getMousePos(e);
+  if (level === 1) {
+    if (draggingRate) {
+      let t = (p.x - rateSlider.x0) / (rateSlider.x1 - rateSlider.x0);
+      rateSlider.handle = Math.max(0, Math.min(1, t));
+    }
+    if (dragging) {
+      dragPos = p;
+    }
+  } else {
+    if (dragging2) {
+      dragPos2 = p;
+    }
+  }
+});
+
+window.addEventListener('mouseup', (e) => {
+  const p = getMousePos(e);
+
+  if (dragging) {
+    let landed = null;
+    for (const key in inputJacks) {
+      const j = inputJacks[key];
+      if (dist(p.x, p.y, j.x, j.y) < j.r + 10) { landed = key; break; }
+    }
+    connection = landed;
+    dragging = false;
+  }
+  draggingRate = false;
+
+  if (dragging2) {
+    let landed = null;
+    for (const key in inputJacks) {
+      const j = inputJacks[key];
+      if (dist(p.x, p.y, j.x, j.y) < j.r + 10) { landed = key; break; }
+    }
+    connection2 = landed;
+    dragging2 = false;
+  }
+});
+
+// ---------- Physics ----------
+function applyForces(dt, aimVal, thrustMag) {
+  // flame direction (points "away" from ship, thrust pushes opposite); gimbal only
+  // sweeps left/right now, always keeping a fixed downward component
+  let fx = aimVal * AIM_MAX;
+  let fy = 1;
+  const flen = Math.hypot(fx, fy) || 1;
+  fx /= flen; fy /= flen;
+
+  const forceX = -fx * thrustMag * FORCE_SCALE;
+  const forceY = -fy * thrustMag * FORCE_SCALE;
+
+  ship.vx += forceX * dt;
+  ship.vy += forceY * dt;
+
+  // linear damping
+  ship.vx -= ship.vx * DRAG * dt;
+  ship.vy -= ship.vy * DRAG * dt;
+
+  ship.x += ship.vx * dt;
+  ship.y += ship.vy * dt;
+
+  // stash last computed thrust visuals for drawing
+  ship._flameX = fx;
+  ship._flameY = fy;
+  ship._thrustMag = thrustMag;
+}
+
+function updateWorldCommon(dt) {
+  // bounds — the hull is wider than it is tall, and sits off-centre vertically,
+  // so clamp against its real extents instead of one radius
+  const k = hitScale();
+  const halfW = 22.4 * k, topY = 19 * k, botY = 20.4 * k;
+  if (ship.x < halfW) { ship.x = halfW; ship.vx = Math.max(0, ship.vx); }
+  if (ship.x > W - halfW) { ship.x = W - halfW; ship.vx = Math.min(0, ship.vx); }
+  if (ship.y < topY) { ship.y = topY; ship.vy = Math.max(0, ship.vy); }
+  if (ship.y > GAME_H - botY) { ship.y = GAME_H - botY; ship.vy = Math.min(0, ship.vy); }
+
+  // asteroids (static field — just spin in place)
+  for (const a of asteroids) {
+    a.rot += a.vrot * dt;
+  }
+
+  for (const a of asteroids) {
+    if (shipOverlaps(a.x, a.y, a.r * ASTEROID_HIT_SCALE)) {
+      finished = 'crashed';
+      break;
+    }
+  }
+
+  if (!finished && shipOverlaps(goal.x, goal.y, goal.r)) {
+    finished = 'goal';
+  }
+}
+
+function step(dt) {
+  if (!started || finished) return;
+  elapsed += dt;
+
+  if (level === 1) {
+    lfoPhase += currentRate() * dt * Math.PI * 2;
+    const lfoValue = Math.sin(lfoPhase);
+
+    if (connection === 'aimLR') aimLR = lfoValue;
+    // signed: -1..1, negative fires the thruster in reverse
+    const thrustMag = connection === 'thrust' ? lfoValue : 0;
+
+    applyForces(dt, aimLR, thrustMag);
+    ship._lfoValue = lfoValue;
+  } else {
+    // single output voltage drives whichever input the one cable is patched to;
+    // aim holds its last value when the cable moves away (same as level 1)
+    if (connection2 === 'aimLR') aimLR = stepVoltage;
+    const thrustMag = connection2 === 'thrust' ? stepVoltage : 0;
+
+    applyForces(dt, aimLR, thrustMag);
+  }
+
+  updateWorldCommon(dt);
+}
+
+// ---------- Drawing ----------
+// Cover-fit the 896x896 starfield across the 1300x760 play area, then knock it back
+// slightly so asteroids and the goal ring stay readable against the nebula.
+function drawBackground() {
+  if (!spaceImg.complete || !spaceImg.naturalWidth) { drawStars(); return; }
+  const scale = Math.max(W / spaceImg.naturalWidth, GAME_H / spaceImg.naturalHeight);
+  const dw = spaceImg.naturalWidth * scale;
+  const dh = spaceImg.naturalHeight * scale;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(0, 0, W, GAME_H);
+  ctx.clip();
+  ctx.drawImage(spaceImg, (W - dw) / 2, (GAME_H - dh) / 2, dw, dh);
+  ctx.fillStyle = 'rgba(0,0,0,0.25)';
+  ctx.fillRect(0, 0, W, GAME_H);
+  ctx.restore();
+}
+
+function drawStars() {
+  ctx.save();
+  for (const s of stars) {
+    ctx.globalAlpha = s.a;
+    ctx.fillStyle = '#9fb3c8';
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+function asteroidPath(a) {
+  ctx.beginPath();
+  const spikes = 8;
+  for (let i = 0; i < spikes; i++) {
+    const ang = (i / spikes) * Math.PI * 2;
+    const rr = a.r * (0.8 + 0.25 * Math.sin(i * 2.1 + a.rot));
+    const x = Math.cos(ang) * rr, y = Math.sin(ang) * rr;
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+}
+
+function drawAsteroids() {
+  for (const a of asteroids) {
+    const img = texImgs[a.tex];
+    ctx.save();
+    ctx.translate(a.x, a.y);
+    ctx.rotate(a.rot);
+    asteroidPath(a);
+
+    if (img.complete && img.naturalWidth) {
+      ctx.save();
+      ctx.clip();
+      // square crop off the source's smaller side keeps the slice unstretched
+      const side = Math.min(img.naturalWidth, img.naturalHeight);
+      const sw = a.cs * side;
+      ctx.drawImage(
+        img,
+        a.cu * (img.naturalWidth - sw), a.cv * (img.naturalHeight - sw), sw, sw,
+        -a.r, -a.r, a.r * 2, a.r * 2
+      );
+      // darken toward the rim so a flat slice reads as a solid lump
+      const vig = ctx.createRadialGradient(0, 0, a.r * 0.25, 0, 0, a.r * 1.05);
+      vig.addColorStop(0, 'rgba(0,0,0,0)');
+      vig.addColorStop(1, 'rgba(0,0,0,0.72)');
+      ctx.fillStyle = vig;
+      ctx.fillRect(-a.r, -a.r, a.r * 2, a.r * 2);
+      ctx.restore();
+    } else {
+      ctx.fillStyle = '#3a3f45';
+      ctx.fill();
+    }
+
+    ctx.strokeStyle = 'rgba(150,165,180,0.55)';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    ctx.restore();
+  }
+}
+
+function drawGoal() {
+  const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 260);
+  ctx.save();
+  ctx.strokeStyle = `rgba(120, 230, 170, ${0.6 + 0.4 * pulse})`;
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.arc(goal.x, goal.y, goal.r + pulse * 4, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.strokeStyle = '#78e6aa';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(goal.x, goal.y, goal.r, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.fillStyle = '#9fb3c8';
+  ctx.font = '11px Courier New';
+  ctx.textAlign = 'center';
+  ctx.fillText('GOAL', goal.x, goal.y - goal.r - 10);
+  ctx.textAlign = 'left';
+  ctx.restore();
+}
+
+function drawShip() {
+  const flameAngle = Math.atan2(ship._flameY || 1, ship._flameX || 0);
+  ctx.save();
+  ctx.translate(ship.x, ship.y);
+
+  // flame — orange fires from the nozzle (forward push), cyan fires from the
+  // opposite side (reverse thrust)
+  const signedMag = ship._thrustMag || 0;
+  const mag = Math.abs(signedMag);
+  if (mag > 0.02) {
+    const reversed = signedMag < 0;
+    ctx.save();
+    ctx.rotate(flameAngle - Math.PI / 2 + (reversed ? Math.PI : 0));
+    const len = 14 + mag * 34;
+    const grad = ctx.createLinearGradient(0, ship.r, 0, ship.r + len);
+    if (reversed) {
+      grad.addColorStop(0, `rgba(130,210,255,${0.9 * mag})`);
+      grad.addColorStop(1, `rgba(40,110,255,0)`);
+    } else {
+      grad.addColorStop(0, `rgba(255,220,120,${0.9 * mag})`);
+      grad.addColorStop(1, `rgba(255,60,20,0)`);
+    }
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.moveTo(-6, ship.r);
+    ctx.lineTo(6, ship.r);
+    ctx.lineTo(0, ship.r + len);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // hull sprite (fixed orientation pointing up)
+  if (shipImg.complete && shipImg.naturalWidth) {
+    ctx.save();
+    if (SHIP_LIFT === 'glow') {
+      ctx.shadowColor = 'rgba(150,200,230,0.75)';
+      ctx.shadowBlur = 10;
+    } else if (SHIP_LIFT === 'bright') {
+      ctx.filter = 'brightness(2.1) contrast(1.15)';
+    }
+    ctx.drawImage(shipImg, -SHIP_DRAW / 2, -SHIP_DRAW / 2, SHIP_DRAW, SHIP_DRAW);
+    ctx.restore();
+  } else {
+    ctx.fillStyle = '#aab4bd';
+    ctx.beginPath();
+    ctx.arc(0, 0, ship.r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  if (SHOW_HITBOX) {
+    const k = hitScale();
+    ctx.strokeStyle = 'rgba(95,214,168,0.9)';
+    ctx.lineWidth = 1;
+    for (const c of SHIP_HIT) {
+      ctx.beginPath();
+      ctx.arc(c.x * k, c.y * k, c.r * k, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+  }
+
+  // little direction indicator for the gimbal aim (nozzle tip)
+  ctx.strokeStyle = '#ffcf6b';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(0, ship.r * 0.75);
+  ctx.lineTo((ship._flameX || 0) * 22, ship.r * 0.75 + (ship._flameY || 1) * 22);
+  ctx.stroke();
+
+  ctx.restore();
+}
+
+function drawJack(j, connected) {
+  ctx.beginPath();
+  ctx.arc(j.x, j.y, j.r, 0, Math.PI * 2);
+  ctx.fillStyle = connected ? '#2c5b4a' : '#151a20';
+  ctx.fill();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = connected ? '#5fd6a8' : '#5a6572';
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(j.x, j.y, 4, 0, Math.PI * 2);
+  ctx.fillStyle = '#0a0d10';
+  ctx.fill();
+}
+
+function drawMeter(x, y, value01, label) {
+  // value01 expected in -1..1 range mapped to bar fill
+  const w = 14, h = 46;
+  ctx.strokeStyle = '#3a434d';
+  ctx.strokeRect(x - w / 2, y - h, w, h);
+  const norm = clamp((value01 + 1) / 2, 0, 1);
+  const fillH = norm * h;
+  ctx.fillStyle = '#5fb0d6';
+  ctx.fillRect(x - w / 2, y - fillH, w, fillH);
+}
+
+function drawCable(x0, y0, x1, y1) {
+  ctx.beginPath();
+  ctx.moveTo(x0, y0);
+  const midY = (y0 + y1) / 2 + 30;
+  ctx.bezierCurveTo(x0, midY, x1, midY, x1, y1);
+  ctx.stroke();
+}
+
+function drawStepButton(btn, label, active) {
+  ctx.fillStyle = active ? '#1d2b24' : '#151a20';
+  ctx.strokeStyle = active ? '#5fd6a8' : '#3a434d';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.rect(btn.x0, btn.y0, btn.x1 - btn.x0, btn.y1 - btn.y0);
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = '#cfd6de';
+  ctx.font = '22px Courier New';
+  ctx.textAlign = 'center';
+  ctx.fillText(label, (btn.x0 + btn.x1) / 2, (btn.y0 + btn.y1) / 2 + 8);
+  ctx.textAlign = 'left';
+}
+
+function drawInputJacks(highlight) {
+  for (const key in inputJacks) {
+    const j = inputJacks[key];
+    const active = highlight(key);
+    drawJack(j, active);
+    ctx.fillStyle = active ? '#9fe8c8' : '#6d7885';
+    ctx.font = '12px Courier New';
+    ctx.fillText(j.label, j.x - 30, j.y - 24);
+  }
+}
+
+function drawPanelLevel1() {
+  ctx.save();
+  ctx.fillStyle = '#0c0f13';
+  ctx.fillRect(0, PANEL_Y0, W, PANEL_H);
+  ctx.strokeStyle = '#22282f';
+  ctx.beginPath();
+  ctx.moveTo(0, PANEL_Y0);
+  ctx.lineTo(W, PANEL_Y0);
+  ctx.stroke();
+
+  // LFO module box
+  ctx.strokeStyle = '#2a323b';
+  ctx.strokeRect(30, PANEL_Y0 + 20, 240, PANEL_H - 40);
+  ctx.fillStyle = '#8fa2b3';
+  ctx.font = '13px Courier New';
+  ctx.fillText('SINE LFO', 45, PANEL_Y0 + 45);
+
+  // rate slider
+  ctx.strokeStyle = '#3a434d';
+  ctx.beginPath();
+  ctx.moveTo(rateSlider.x0, rateSlider.y);
+  ctx.lineTo(rateSlider.x1, rateSlider.y);
+  ctx.stroke();
+  const handleX = rateSlider.x0 + rateSlider.handle * (rateSlider.x1 - rateSlider.x0);
+  ctx.beginPath();
+  ctx.arc(handleX, rateSlider.y, 8, 0, Math.PI * 2);
+  ctx.fillStyle = '#e0b45a';
+  ctx.fill();
+  ctx.fillStyle = '#6d7885';
+  ctx.font = '11px Courier New';
+  ctx.fillText('RATE', rateSlider.x0, rateSlider.y - 16);
+  ctx.fillText(currentRate().toFixed(2) + ' Hz', rateSlider.x0 + 90, rateSlider.y - 16);
+
+  // lfo live value meter + out jack
+  drawMeter(lfoOutJack.x - 45, PANEL_Y0 + 190, ship._lfoValue || 0, '');
+  drawJack(lfoOutJack, connection !== null || dragging);
+  ctx.fillStyle = '#6d7885';
+  ctx.fillText('OUT', lfoOutJack.x - 12, PANEL_Y0 + 195);
+
+  // input jacks
+  drawInputJacks((key) => connection === key);
+  drawMeter(inputJacks.aimLR.x - 45, PANEL_Y0 + 190, aimLR, '');
+  drawMeter(inputJacks.thrust.x - 45, PANEL_Y0 + 190, (connection === 'thrust' ? (ship._lfoValue || 0) : -1), '');
+
+  // cable
+  ctx.lineWidth = 4;
+  ctx.strokeStyle = '#4a9dd6';
+  ctx.lineCap = 'round';
+  if (connection) {
+    const j = inputJacks[connection];
+    drawCable(lfoOutJack.x, lfoOutJack.y, j.x, j.y);
+  }
+  if (dragging) {
+    drawCable(lfoOutJack.x, lfoOutJack.y, dragPos.x, dragPos.y);
+  }
+
+  ctx.restore();
+}
+
+function drawPanelLevel2() {
+  ctx.save();
+  ctx.fillStyle = '#0c0f13';
+  ctx.fillRect(0, PANEL_Y0, W, PANEL_H);
+  ctx.strokeStyle = '#22282f';
+  ctx.beginPath();
+  ctx.moveTo(0, PANEL_Y0);
+  ctx.lineTo(W, PANEL_Y0);
+  ctx.stroke();
+
+  // step control module box
+  ctx.strokeStyle = '#2a323b';
+  ctx.strokeRect(30, PANEL_Y0 + 20, 240, PANEL_H - 40);
+  ctx.fillStyle = '#8fa2b3';
+  ctx.font = '13px Courier New';
+  ctx.fillText('STEP CONTROL', 45, PANEL_Y0 + 45);
+
+  drawStepButton(plusButton, '+', false);
+  drawStepButton(minusButton, '−', false);
+
+  // single voltage meter for the module's output, plus its readout
+  drawMeter(stepOutJack.x - 45, PANEL_Y0 + 190, stepVoltage, '');
+  ctx.fillStyle = '#6d7885';
+  ctx.font = '11px Courier New';
+  ctx.fillText(stepVoltage.toFixed(2) + ' V', 45, PANEL_Y0 + 130);
+
+  // module out jack
+  drawJack(stepOutJack, connection2 !== null || dragging2);
+  ctx.fillStyle = '#6d7885';
+  ctx.fillText('OUT', stepOutJack.x - 12, stepOutJack.y + 28);
+
+  // input jacks (no per-input meters now)
+  drawInputJacks((key) => connection2 === key);
+
+  // single cable
+  ctx.lineWidth = 4;
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = '#4a9dd6';
+  if (connection2) {
+    const j = inputJacks[connection2];
+    drawCable(stepOutJack.x, stepOutJack.y, j.x, j.y);
+  }
+  if (dragging2) {
+    drawCable(stepOutJack.x, stepOutJack.y, dragPos2.x, dragPos2.y);
+  }
+
+  ctx.restore();
+}
+
+// The title art is 4:3 and the play area is wider, so contain-fit it — cover-fit
+// would crop the lettering off the top and bottom.
+function drawTitle() {
+  ctx.save();
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, W, GAME_H);
+  if (titleImg.complete && titleImg.naturalWidth) {
+    const scale = Math.min(W / titleImg.naturalWidth, GAME_H / titleImg.naturalHeight);
+    const dw = titleImg.naturalWidth * scale, dh = titleImg.naturalHeight * scale;
+    ctx.drawImage(titleImg, (W - dw) / 2, (GAME_H - dh) / 2, dw, dh);
+  }
+  const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 340);
+  ctx.font = '20px Courier New';
+  ctx.textAlign = 'center';
+  ctx.fillStyle = 'rgba(0,0,0,0.65)';
+  ctx.fillRect(W / 2 - 150, GAME_H - 58, 300, 34);
+  ctx.fillStyle = `rgba(159, 232, 200, ${0.55 + 0.45 * pulse})`;
+  ctx.fillText('CLICK TO START', W / 2, GAME_H - 34);
+  ctx.textAlign = 'left';
+  ctx.restore();
+}
+
+function drawHUD() {
+  ctx.fillStyle = '#cfd6de';
+  ctx.font = '16px Courier New';
+  ctx.fillText('TIME: ' + elapsed.toFixed(1) + 's', 16, 26);
+  ctx.textAlign = 'right';
+  ctx.fillText('LEVEL ' + level, W - 16, 26);
+  ctx.textAlign = 'left';
+
+  if (finished) {
+    const win = finished === 'goal';
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    ctx.fillRect(0, 0, W, GAME_H);
+    ctx.fillStyle = win ? '#78e6aa' : '#ff8f6b';
+    ctx.font = '28px Courier New';
+    ctx.textAlign = 'center';
+    ctx.fillText(win ? 'GOAL REACHED' : 'CRASHED', W / 2, GAME_H / 2 - 10);
+    ctx.font = '16px Courier New';
+    ctx.fillStyle = '#cfd6de';
+    const nextMsg = (win && level === 1)
+      ? 'Time ' + elapsed.toFixed(1) + 's — click for LEVEL 2'
+      : 'Time ' + elapsed.toFixed(1) + 's — click for a new field';
+    ctx.fillText(nextMsg, W / 2, GAME_H / 2 + 20);
+    ctx.textAlign = 'left';
+  }
+}
+
+function render() {
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, W, GAME_H);
+  if (started) {
+    drawBackground();
+    drawGoal();
+    drawAsteroids();
+    drawShip();
+    drawHUD();
+  } else {
+    drawTitle();
+  }
+  if (level === 1) drawPanelLevel1(); else drawPanelLevel2();
+}
+
+function loop(now) {
+  const dt = Math.min(0.05, (now - lastTime) / 1000);
+  lastTime = now;
+  step(dt);
+  render();
+  requestAnimationFrame(loop);
+}
+
+updateHintText();
+updateLevelButtons();
+restart();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

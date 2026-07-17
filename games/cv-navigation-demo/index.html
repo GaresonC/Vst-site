@@ -1,0 +1,552 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>CV Thruster POC</title>
+<style>
+  html, body {
+    margin: 0;
+    background: #05070a;
+    color: #cfd6de;
+    font-family: 'Courier New', monospace;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+  }
+  #wrap {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+  }
+  canvas {
+    background: #000;
+    display: block;
+    cursor: default;
+    border: 1px solid #222;
+  }
+  h1 {
+    font-size: 15px;
+    letter-spacing: 2px;
+    color: #8fa2b3;
+    font-weight: normal;
+    margin: 6px 0 0 0;
+  }
+  p.hint {
+    font-size: 12px;
+    color: #556170;
+    margin: 0 0 6px 0;
+    max-width: 1200px;
+    text-align: center;
+  }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <h1>CONTROL VOLTAGE THRUSTER — PROOF OF CONCEPT</h1>
+  <p class="hint">Drag a cable from LFO OUT to one of the ship's two jacks. Only one cable exists — move it between AIM L/R and THRUSTER to steer. AIM L/R freezes at its last value when unpatched; THRUSTER (which can push forward or reverse) drops to zero the instant it's unpatched.</p>
+  <canvas id="game" width="1300" height="980"></canvas>
+</div>
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+const GAME_H = 760;
+const PANEL_Y0 = GAME_H;
+const PANEL_H = H - GAME_H;
+
+// ---------- Jack layout ----------
+const lfoOutJack = { x: 150, y: PANEL_Y0 + 160, r: 13 };
+const rateSlider = { x0: 60, x1: 240, y: PANEL_Y0 + 90, handle: 0.35 }; // handle: 0..1 position
+const RATE_MIN = 0.15, RATE_MAX = 2.5;
+
+const inputJacks = {
+  aimLR:  { x: 650, y: PANEL_Y0 + 160, r: 13, label: 'AIM L/R' },
+  thrust: { x: 950, y: PANEL_Y0 + 160, r: 13, label: 'THRUSTER' },
+};
+
+// ---------- Patch state ----------
+let connection = null; // 'aimLR' | 'thrust' | null
+let dragging = false;
+let dragPos = { x: 0, y: 0 };
+let draggingRate = false;
+
+// persistent held value (aim holds its last value; thrust is recomputed fresh every
+// frame — signed -1..1, negative = reverse thrust)
+let aimLR = 0;
+
+let lfoPhase = 0;
+
+function currentRate() {
+  return RATE_MIN + rateSlider.handle * (RATE_MAX - RATE_MIN);
+}
+
+// ---------- Ship state ----------
+const ship = {
+  x: W / 2, y: GAME_H / 2, vx: 0, vy: 0, r: 16,
+};
+const FORCE_SCALE = 260;
+const DRAG = 0.6; // linear damping coefficient
+const AIM_MAX = 1.0;
+
+const SHIP_START = { x: W / 2, y: GAME_H - 60 };
+
+function resetShip() {
+  ship.x = SHIP_START.x; ship.y = SHIP_START.y; ship.vx = 0; ship.vy = 0;
+  aimLR = 0; connection = null;
+}
+
+// ---------- Asteroid field + goal (static layout, regenerated each run) ----------
+let asteroids = [];
+const goal = { x: W / 2, y: 70, r: 22 };
+
+function generateField() {
+  goal.x = 110 + Math.random() * (W - 220);
+  goal.y = 65;
+
+  asteroids = [];
+  const count = 26;
+  let attempts = 0;
+  while (asteroids.length < count && attempts < 500) {
+    attempts++;
+    const r = 14 + Math.random() * 24;
+    const x = r + Math.random() * (W - 2 * r);
+    const y = 130 + Math.random() * (GAME_H - 130 - 130);
+
+    if (dist(x, y, SHIP_START.x, SHIP_START.y) < r + 90) continue;
+    if (dist(x, y, goal.x, goal.y) < r + 90) continue;
+
+    let overlaps = false;
+    for (const a of asteroids) {
+      if (dist(x, y, a.x, a.y) < r + a.r + 20) { overlaps = true; break; }
+    }
+    if (overlaps) continue;
+
+    asteroids.push({
+      x, y, r,
+      rot: Math.random() * Math.PI * 2,
+      vrot: (Math.random() - 0.5) * 0.7,
+    });
+  }
+}
+
+// ---------- Stars ----------
+const stars = [];
+for (let i = 0; i < 70; i++) {
+  stars.push({
+    x: Math.random() * W,
+    y: Math.random() * GAME_H,
+    r: 1 + Math.random() * 2.4,
+    a: 0.2 + Math.random() * 0.5,
+  });
+}
+
+// ---------- Game state ----------
+let finished = null; // null | 'crashed' | 'goal'
+let elapsed = 0;
+let lastTime = performance.now();
+
+function restart() {
+  elapsed = 0;
+  finished = null;
+  resetShip();
+  generateField();
+}
+
+// ---------- Input handling ----------
+function getMousePos(evt) {
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: (evt.clientX - rect.left) * (canvas.width / rect.width),
+    y: (evt.clientY - rect.top) * (canvas.height / rect.height),
+  };
+}
+
+function dist(ax, ay, bx, by) {
+  return Math.hypot(ax - bx, ay - by);
+}
+
+canvas.addEventListener('mousedown', (e) => {
+  const p = getMousePos(e);
+
+  if (finished) {
+    restart();
+    return;
+  }
+
+  // rate slider handle
+  const handleX = rateSlider.x0 + rateSlider.handle * (rateSlider.x1 - rateSlider.x0);
+  if (Math.abs(p.x - handleX) < 12 && Math.abs(p.y - rateSlider.y) < 12) {
+    draggingRate = true;
+    return;
+  }
+
+  // grab from LFO out jack
+  if (dist(p.x, p.y, lfoOutJack.x, lfoOutJack.y) < lfoOutJack.r + 6) {
+    dragging = true;
+    dragPos = p;
+    connection = null; // picking up detaches current connection
+    return;
+  }
+
+  // grab existing cable at its connected jack
+  if (connection && dist(p.x, p.y, inputJacks[connection].x, inputJacks[connection].y) < inputJacks[connection].r + 6) {
+    dragging = true;
+    dragPos = p;
+    connection = null;
+    return;
+  }
+});
+
+canvas.addEventListener('mousemove', (e) => {
+  const p = getMousePos(e);
+  if (draggingRate) {
+    let t = (p.x - rateSlider.x0) / (rateSlider.x1 - rateSlider.x0);
+    rateSlider.handle = Math.max(0, Math.min(1, t));
+  }
+  if (dragging) {
+    dragPos = p;
+  }
+});
+
+window.addEventListener('mouseup', (e) => {
+  if (dragging) {
+    const p = getMousePos(e);
+    let landed = null;
+    for (const key in inputJacks) {
+      const j = inputJacks[key];
+      if (dist(p.x, p.y, j.x, j.y) < j.r + 10) { landed = key; break; }
+    }
+    connection = landed;
+    dragging = false;
+  }
+  draggingRate = false;
+});
+
+// ---------- Physics ----------
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+function step(dt) {
+  if (finished) return;
+
+  elapsed += dt;
+
+  lfoPhase += currentRate() * dt * Math.PI * 2;
+  const lfoValue = Math.sin(lfoPhase);
+
+  if (connection === 'aimLR') aimLR = lfoValue;
+  // signed: -1..1, negative fires the thruster in reverse
+  const thrustMag = connection === 'thrust' ? lfoValue : 0;
+
+  // flame direction (points "away" from ship, thrust pushes opposite); gimbal only
+  // sweeps left/right now, always keeping a fixed downward component
+  let fx = aimLR * AIM_MAX;
+  let fy = 1;
+  const flen = Math.hypot(fx, fy) || 1;
+  fx /= flen; fy /= flen;
+
+  const forceX = -fx * thrustMag * FORCE_SCALE;
+  const forceY = -fy * thrustMag * FORCE_SCALE;
+
+  ship.vx += forceX * dt;
+  ship.vy += forceY * dt;
+
+  // linear damping
+  ship.vx -= ship.vx * DRAG * dt;
+  ship.vy -= ship.vy * DRAG * dt;
+
+  ship.x += ship.vx * dt;
+  ship.y += ship.vy * dt;
+
+  // bounds
+  if (ship.x < ship.r) { ship.x = ship.r; ship.vx = Math.max(0, ship.vx); }
+  if (ship.x > W - ship.r) { ship.x = W - ship.r; ship.vx = Math.min(0, ship.vx); }
+  if (ship.y < ship.r) { ship.y = ship.r; ship.vy = Math.max(0, ship.vy); }
+  if (ship.y > GAME_H - ship.r) { ship.y = GAME_H - ship.r; ship.vy = Math.min(0, ship.vy); }
+
+  // asteroids (static field — just spin in place)
+  for (const a of asteroids) {
+    a.rot += a.vrot * dt;
+  }
+
+  for (const a of asteroids) {
+    if (dist(ship.x, ship.y, a.x, a.y) < ship.r + a.r - 4) {
+      finished = 'crashed';
+      break;
+    }
+  }
+
+  if (!finished && dist(ship.x, ship.y, goal.x, goal.y) < ship.r + goal.r) {
+    finished = 'goal';
+  }
+
+  // stash last computed thrust visuals for drawing
+  ship._flameX = fx;
+  ship._flameY = fy;
+  ship._thrustMag = thrustMag;
+  ship._lfoValue = lfoValue;
+}
+
+// ---------- Drawing ----------
+function drawStars() {
+  ctx.save();
+  for (const s of stars) {
+    ctx.globalAlpha = s.a;
+    ctx.fillStyle = '#9fb3c8';
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawAsteroids() {
+  ctx.save();
+  for (const a of asteroids) {
+    ctx.save();
+    ctx.translate(a.x, a.y);
+    ctx.rotate(a.rot);
+    ctx.fillStyle = '#3a3f45';
+    ctx.strokeStyle = '#5c6570';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    const spikes = 8;
+    for (let i = 0; i < spikes; i++) {
+      const ang = (i / spikes) * Math.PI * 2;
+      const rr = a.r * (0.8 + 0.25 * Math.sin(i * 2.1 + a.rot));
+      const x = Math.cos(ang) * rr, y = Math.sin(ang) * rr;
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+  }
+  ctx.restore();
+}
+
+function drawGoal() {
+  const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 260);
+  ctx.save();
+  ctx.strokeStyle = `rgba(120, 230, 170, ${0.6 + 0.4 * pulse})`;
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.arc(goal.x, goal.y, goal.r + pulse * 4, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.strokeStyle = '#78e6aa';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(goal.x, goal.y, goal.r, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.fillStyle = '#9fb3c8';
+  ctx.font = '11px Courier New';
+  ctx.textAlign = 'center';
+  ctx.fillText('GOAL', goal.x, goal.y - goal.r - 10);
+  ctx.textAlign = 'left';
+  ctx.restore();
+}
+
+function drawShip() {
+  const flameAngle = Math.atan2(ship._flameY || 1, ship._flameX || 0);
+  ctx.save();
+  ctx.translate(ship.x, ship.y);
+
+  // flame — orange fires from the nozzle (forward push), cyan fires from the
+  // opposite side (reverse thrust)
+  const signedMag = ship._thrustMag || 0;
+  const mag = Math.abs(signedMag);
+  if (mag > 0.02) {
+    const reversed = signedMag < 0;
+    ctx.save();
+    ctx.rotate(flameAngle - Math.PI / 2 + (reversed ? Math.PI : 0));
+    const len = 14 + mag * 34;
+    const grad = ctx.createLinearGradient(0, ship.r, 0, ship.r + len);
+    if (reversed) {
+      grad.addColorStop(0, `rgba(130,210,255,${0.9 * mag})`);
+      grad.addColorStop(1, `rgba(40,110,255,0)`);
+    } else {
+      grad.addColorStop(0, `rgba(255,220,120,${0.9 * mag})`);
+      grad.addColorStop(1, `rgba(255,60,20,0)`);
+    }
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.moveTo(-6, ship.r);
+    ctx.lineTo(6, ship.r);
+    ctx.lineTo(0, ship.r + len);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // hull (rocket shape, fixed orientation pointing up)
+  ctx.fillStyle = '#aab4bd';
+  ctx.strokeStyle = '#e8edf1';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(0, -ship.r);
+  ctx.quadraticCurveTo(ship.r * 0.9, -ship.r * 0.2, ship.r * 0.55, ship.r * 0.6);
+  ctx.lineTo(ship.r * 0.85, ship.r * 0.95);
+  ctx.lineTo(ship.r * 0.35, ship.r * 0.55);
+  ctx.lineTo(-ship.r * 0.35, ship.r * 0.55);
+  ctx.lineTo(-ship.r * 0.85, ship.r * 0.95);
+  ctx.lineTo(-ship.r * 0.55, ship.r * 0.6);
+  ctx.quadraticCurveTo(-ship.r * 0.9, -ship.r * 0.2, 0, -ship.r);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+
+  // little direction indicator for the gimbal aim (nozzle tip)
+  ctx.strokeStyle = '#ffcf6b';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(0, ship.r * 0.75);
+  ctx.lineTo((ship._flameX || 0) * 22, ship.r * 0.75 + (ship._flameY || 1) * 22);
+  ctx.stroke();
+
+  ctx.restore();
+}
+
+function drawJack(j, connected) {
+  ctx.beginPath();
+  ctx.arc(j.x, j.y, j.r, 0, Math.PI * 2);
+  ctx.fillStyle = connected ? '#2c5b4a' : '#151a20';
+  ctx.fill();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = connected ? '#5fd6a8' : '#5a6572';
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(j.x, j.y, 4, 0, Math.PI * 2);
+  ctx.fillStyle = '#0a0d10';
+  ctx.fill();
+}
+
+function drawMeter(x, y, value01, label) {
+  // value01 expected in -1..1 range mapped to bar fill
+  const w = 14, h = 46;
+  ctx.strokeStyle = '#3a434d';
+  ctx.strokeRect(x - w / 2, y - h, w, h);
+  const norm = clamp((value01 + 1) / 2, 0, 1);
+  const fillH = norm * h;
+  ctx.fillStyle = '#5fb0d6';
+  ctx.fillRect(x - w / 2, y - fillH, w, fillH);
+}
+
+function drawPanel() {
+  ctx.save();
+  ctx.fillStyle = '#0c0f13';
+  ctx.fillRect(0, PANEL_Y0, W, PANEL_H);
+  ctx.strokeStyle = '#22282f';
+  ctx.beginPath();
+  ctx.moveTo(0, PANEL_Y0);
+  ctx.lineTo(W, PANEL_Y0);
+  ctx.stroke();
+
+  // LFO module box
+  ctx.strokeStyle = '#2a323b';
+  ctx.strokeRect(30, PANEL_Y0 + 20, 240, PANEL_H - 40);
+  ctx.fillStyle = '#8fa2b3';
+  ctx.font = '13px Courier New';
+  ctx.fillText('SINE LFO', 45, PANEL_Y0 + 45);
+
+  // rate slider
+  ctx.strokeStyle = '#3a434d';
+  ctx.beginPath();
+  ctx.moveTo(rateSlider.x0, rateSlider.y);
+  ctx.lineTo(rateSlider.x1, rateSlider.y);
+  ctx.stroke();
+  const handleX = rateSlider.x0 + rateSlider.handle * (rateSlider.x1 - rateSlider.x0);
+  ctx.beginPath();
+  ctx.arc(handleX, rateSlider.y, 8, 0, Math.PI * 2);
+  ctx.fillStyle = '#e0b45a';
+  ctx.fill();
+  ctx.fillStyle = '#6d7885';
+  ctx.font = '11px Courier New';
+  ctx.fillText('RATE', rateSlider.x0, rateSlider.y - 16);
+  ctx.fillText(currentRate().toFixed(2) + ' Hz', rateSlider.x0 + 90, rateSlider.y - 16);
+
+  // lfo live value meter + out jack
+  drawMeter(lfoOutJack.x - 45, PANEL_Y0 + 190, ship._lfoValue || 0, '');
+  drawJack(lfoOutJack, connection !== null || dragging);
+  ctx.fillStyle = '#6d7885';
+  ctx.fillText('OUT', lfoOutJack.x - 12, PANEL_Y0 + 195);
+
+  // input jacks
+  for (const key in inputJacks) {
+    const j = inputJacks[key];
+    drawJack(j, connection === key);
+    ctx.fillStyle = connection === key ? '#9fe8c8' : '#6d7885';
+    ctx.font = '12px Courier New';
+    ctx.fillText(j.label, j.x - 30, j.y - 24);
+  }
+  drawMeter(inputJacks.aimLR.x - 45, PANEL_Y0 + 190, aimLR, '');
+  drawMeter(inputJacks.thrust.x - 45, PANEL_Y0 + 190, (connection === 'thrust' ? (ship._lfoValue || 0) : -1), '');
+
+  // cable
+  ctx.lineWidth = 4;
+  ctx.strokeStyle = '#4a9dd6';
+  ctx.lineCap = 'round';
+  if (connection) {
+    const j = inputJacks[connection];
+    drawCable(lfoOutJack.x, lfoOutJack.y, j.x, j.y);
+  }
+  if (dragging) {
+    drawCable(lfoOutJack.x, lfoOutJack.y, dragPos.x, dragPos.y);
+  }
+
+  ctx.restore();
+}
+
+function drawCable(x0, y0, x1, y1) {
+  ctx.beginPath();
+  ctx.moveTo(x0, y0);
+  const midY = (y0 + y1) / 2 + 30;
+  ctx.bezierCurveTo(x0, midY, x1, midY, x1, y1);
+  ctx.stroke();
+}
+
+function drawHUD() {
+  ctx.fillStyle = '#cfd6de';
+  ctx.font = '16px Courier New';
+  ctx.fillText('TIME: ' + elapsed.toFixed(1) + 's', 16, 26);
+
+  if (finished) {
+    const win = finished === 'goal';
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    ctx.fillRect(0, 0, W, GAME_H);
+    ctx.fillStyle = win ? '#78e6aa' : '#ff8f6b';
+    ctx.font = '28px Courier New';
+    ctx.textAlign = 'center';
+    ctx.fillText(win ? 'GOAL REACHED' : 'CRASHED', W / 2, GAME_H / 2 - 10);
+    ctx.font = '16px Courier New';
+    ctx.fillStyle = '#cfd6de';
+    ctx.fillText('Time ' + elapsed.toFixed(1) + 's — click for a new field', W / 2, GAME_H / 2 + 20);
+    ctx.textAlign = 'left';
+  }
+}
+
+function render() {
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, W, GAME_H);
+  drawStars();
+  drawGoal();
+  drawAsteroids();
+  drawShip();
+  drawHUD();
+  drawPanel();
+}
+
+function loop(now) {
+  const dt = Math.min(0.05, (now - lastTime) / 1000);
+  lastTime = now;
+  step(dt);
+  render();
+  requestAnimationFrame(loop);
+}
+
+restart();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

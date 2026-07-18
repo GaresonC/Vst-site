@@ -354,9 +354,67 @@ let finished = null; // null | 'crashed' | 'goal'
 let elapsed = 0;
 let lastTime = performance.now();
 
+// ---------- Leaderboard (per-level arcade high scores, saved in localStorage) ----------
+const LB_KEY = 'cvSpaceCruiseScores';
+const LB_SIZE = 5; // top times kept per level
+let enteringName = false;         // true while the player is patching in their initials
+let entryInitials = ['A', 'A', 'A'];
+let entryTime = 0;                // the run time being recorded
+let lastEntry = null;             // { lvl, n, t } — highlights the freshly-added row
+
+// Initials are entered with the sine wave: patch its OUT into a letter jack and the
+// voltage sets that slot's letter (A..Z); patch it into SAVE to submit once the
+// voltage goes positive.
+let entryConn = null;             // null | 'l0' | 'l1' | 'l2' | 'enter'
+let entryDragging = false;
+let entryDragPos = { x: 0, y: 0 };
+const entryJacks = {
+  l0:    { x: 520,  y: PANEL_Y0 + 160, r: 13, label: 'LTR 1' },
+  l1:    { x: 720,  y: PANEL_Y0 + 160, r: 13, label: 'LTR 2' },
+  l2:    { x: 920,  y: PANEL_Y0 + 160, r: 13, label: 'LTR 3' },
+  enter: { x: 1180, y: PANEL_Y0 + 160, r: 13, label: 'SAVE' },
+};
+
+function loadBoards() {
+  try { return JSON.parse(localStorage.getItem(LB_KEY)) || {}; }
+  catch (e) { return {}; }
+}
+function getBoard(lvl) {
+  const all = loadBoards();
+  return (all[lvl] || []).slice().sort((a, b) => a.t - b.t).slice(0, LB_SIZE);
+}
+// a time earns a spot if the board isn't full or it beats the current slowest
+function qualifies(lvl, t) {
+  const board = getBoard(lvl);
+  return board.length < LB_SIZE || t < board[board.length - 1].t;
+}
+function addScore(lvl, initials, t) {
+  const all = loadBoards();
+  const arr = (all[lvl] || []).concat([{ n: initials, t: t }]);
+  arr.sort((a, b) => a.t - b.t);
+  all[lvl] = arr.slice(0, LB_SIZE);
+  try { localStorage.setItem(LB_KEY, JSON.stringify(all)); } catch (e) {}
+  lastEntry = { lvl: lvl, n: initials, t: t };
+}
+
+// called the moment a run is won; opens initials entry if the time makes the board
+function winRun() {
+  finished = 'goal';
+  entryTime = elapsed;
+  if (qualifies(level, entryTime)) {
+    enteringName = true;
+    entryInitials = ['A', 'A', 'A'];
+    entryConn = null;
+    entryDragging = false;
+  }
+}
+
 function restart() {
   elapsed = 0;
   finished = null;
+  enteringName = false;
+  entryConn = null;
+  entryDragging = false;
   goalStage = 1;
   resetShip();
   if (level === 1) resetLevel1Controls();
@@ -390,6 +448,26 @@ canvas.addEventListener('mousedown', (e) => {
   if (!started) {
     started = true;
     restart();
+    return;
+  }
+
+  if (enteringName) {
+    // initials are patched in with the sine wave, not typed
+    const handleX = rateSlider.x0 + rateSlider.handle * (rateSlider.x1 - rateSlider.x0);
+    if (Math.abs(p.x - handleX) < 12 && Math.abs(p.y - rateSlider.y) < 12) {
+      draggingRate = true;
+      return;
+    }
+    // grab a fresh cable from the sine OUT jack
+    if (dist(p.x, p.y, lfoOutJack.x, lfoOutJack.y) < lfoOutJack.r + 6) {
+      entryDragging = true; entryDragPos = p; entryConn = null;
+      return;
+    }
+    // grab the cable back off the jack it's patched into
+    if (entryConn && dist(p.x, p.y, entryJacks[entryConn].x, entryJacks[entryConn].y) < entryJacks[entryConn].r + 6) {
+      entryDragging = true; entryDragPos = p; entryConn = null;
+      return;
+    }
     return;
   }
 
@@ -470,6 +548,7 @@ canvas.addEventListener('mousemove', (e) => {
   }
   if (dragging) dragPos = p;
   if (dragging2) dragPos2 = p;
+  if (entryDragging) entryDragPos = p;
 });
 
 window.addEventListener('mouseup', (e) => {
@@ -494,6 +573,16 @@ window.addEventListener('mouseup', (e) => {
     }
     connection2 = landed;
     dragging2 = false;
+  }
+
+  if (entryDragging) {
+    let landed = null;
+    for (const key in entryJacks) {
+      const j = entryJacks[key];
+      if (dist(p.x, p.y, j.x, j.y) < j.r + 10) { landed = key; break; }
+    }
+    entryConn = landed;
+    entryDragging = false;
   }
 });
 
@@ -556,15 +645,33 @@ function updateWorldCommon(dt) {
       if (goalStage === 1) {
         if (shipOverlaps(goal.x, goal.y, goal.r)) goalStage = 2;
       } else if (shipOverlaps(goal2.x, goal2.y, goal2.r)) {
-        finished = 'goal';
+        winRun();
       }
     } else if (shipOverlaps(goal.x, goal.y, goal.r)) {
-      finished = 'goal';
+      winRun();
     }
   }
 }
 
+// during initials entry the sine wave keeps oscillating; its voltage drives the
+// patched letter slot, and patching SAVE submits once the voltage swings positive
+function stepEntry(dt) {
+  lfoPhase += currentRate() * dt * Math.PI * 2;
+  const v = Math.sin(lfoPhase);
+  ship._lfoValue = v; // feeds the OUT meter
+  if (entryConn === 'l0' || entryConn === 'l1' || entryConn === 'l2') {
+    const slot = +entryConn[1];
+    const idx = Math.round((v + 1) / 2 * 25); // -1..+1 V -> A..Z
+    entryInitials[slot] = String.fromCharCode(65 + idx);
+  } else if (entryConn === 'enter' && v > 0) {
+    addScore(level, entryInitials.join(''), entryTime);
+    enteringName = false;
+    entryConn = null;
+  }
+}
+
 function step(dt) {
+  if (enteringName) { stepEntry(dt); return; }
   if (!started || finished) return;
   elapsed += dt;
 
@@ -859,8 +966,9 @@ function drawPanelBase() {
   ctx.stroke();
 }
 
-// The sine-wave (LFO) module — fixed left slot, used by levels 1 and 3.
-function drawSineModuleUI() {
+// The sine-wave (LFO) module — fixed left slot, used by levels 1 and 3 (and the
+// initials-entry screen, which passes its own OUT-jack lit state).
+function drawSineModuleUI(outPatched) {
   ctx.strokeStyle = '#2a323b';
   ctx.strokeRect(30, PANEL_Y0 + 20, 240, PANEL_H - 40);
   ctx.fillStyle = '#8fa2b3';
@@ -884,7 +992,8 @@ function drawSineModuleUI() {
 
   // lfo live value meter + out jack
   drawMeter(lfoOutJack.x - 45, PANEL_Y0 + 190, ship._lfoValue || 0, '');
-  drawJack(lfoOutJack, connection !== null || dragging);
+  const outLit = outPatched !== undefined ? outPatched : (connection !== null || dragging);
+  drawJack(lfoOutJack, outLit);
   ctx.fillStyle = '#6d7885';
   ctx.fillText('OUT', lfoOutJack.x - 12, PANEL_Y0 + 195);
 }
@@ -999,6 +1108,98 @@ function drawTitle() {
   ctx.restore();
 }
 
+// arcade high-score table for one level, centred on cx with its header at topY
+function drawLeaderboard(lvl, cx, topY) {
+  const board = getBoard(lvl);
+  ctx.textAlign = 'center';
+  ctx.font = '15px Courier New';
+  ctx.fillStyle = '#8fa2b3';
+  ctx.fillText('— LEVEL ' + lvl + ' BEST TIMES —', cx, topY);
+
+  ctx.font = '16px Courier New';
+  const rowH = 26;
+  if (board.length === 0) {
+    ctx.fillStyle = '#556170';
+    ctx.fillText('no times yet — be the first', cx, topY + rowH);
+    ctx.textAlign = 'left';
+    return;
+  }
+  for (let i = 0; i < board.length; i++) {
+    const e = board[i];
+    const isNew = lastEntry && lastEntry.lvl === lvl &&
+                  lastEntry.n === e.n && Math.abs(lastEntry.t - e.t) < 1e-9;
+    ctx.fillStyle = isNew ? '#9fe8c8' : '#cfd6de';
+    ctx.fillText((i + 1) + '.   ' + e.n + '    ' + e.t.toFixed(2) + 's', cx, topY + rowH * (i + 1));
+  }
+  ctx.textAlign = 'left';
+}
+
+// the "NEW RECORD" screen with the three initial slots
+function drawNameEntry() {
+  const cx = W / 2, cy = GAME_H / 2;
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ffd166';
+  ctx.font = '26px Courier New';
+  ctx.fillText('NEW RECORD!', cx, cy - 150);
+  ctx.fillStyle = '#cfd6de';
+  ctx.font = '16px Courier New';
+  ctx.fillText('Level ' + level + '  —  ' + entryTime.toFixed(2) + 's', cx, cy - 118);
+
+  const slotW = 54, gap = 20;
+  const totalW = 3 * slotW + 2 * gap;
+  const startX = cx - totalW / 2;
+  const boxY = cy - 90, boxH = 66;
+  for (let i = 0; i < 3; i++) {
+    const x = startX + i * (slotW + gap);
+    const active = entryConn === ('l' + i); // slot currently being driven by the cable
+    ctx.strokeStyle = active ? '#5fd6a8' : '#3a434d';
+    ctx.lineWidth = active ? 3 : 2;
+    ctx.strokeRect(x, boxY, slotW, boxH);
+    ctx.fillStyle = active ? '#9fe8c8' : '#cfd6de';
+    ctx.font = '40px Courier New';
+    ctx.fillText(entryInitials[i], x + slotW / 2, boxY + boxH - 18);
+  }
+
+  ctx.fillStyle = '#6d7885';
+  ctx.font = '13px Courier New';
+  ctx.fillText('patch the SINE WAVE into a letter jack to spin it — unplug to lock',
+               cx, boxY + boxH + 30);
+  ctx.fillText('then patch SAVE and wait for a positive voltage to submit',
+               cx, boxY + boxH + 50);
+  ctx.textAlign = 'left';
+}
+
+// Panel for the initials-entry screen: the sine module plus the four entry jacks.
+function drawEntryPanel() {
+  ctx.save();
+  drawPanelBase();
+  drawSineModuleUI(entryConn !== null || entryDragging);
+
+  for (const key in entryJacks) {
+    const j = entryJacks[key];
+    const active = entryConn === key;
+    drawJack(j, active);
+    ctx.fillStyle = active ? '#9fe8c8' : '#6d7885';
+    ctx.font = '15px "Courier New", monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(j.label, j.x, j.y - 24);
+    ctx.textAlign = 'left';
+  }
+
+  // the single patch cable
+  ctx.lineWidth = 4;
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = '#4a9dd6';
+  if (entryConn) {
+    const j = entryJacks[entryConn];
+    drawCable(lfoOutJack.x, lfoOutJack.y, j.x, j.y);
+  }
+  if (entryDragging) {
+    drawCable(lfoOutJack.x, lfoOutJack.y, entryDragPos.x, entryDragPos.y);
+  }
+  ctx.restore();
+}
+
 function drawHUD() {
   ctx.fillStyle = '#cfd6de';
   ctx.font = '16px Courier New';
@@ -1011,10 +1212,16 @@ function drawHUD() {
     const win = finished === 'goal';
     ctx.fillStyle = 'rgba(0,0,0,0.55)';
     ctx.fillRect(0, 0, W, GAME_H);
+
+    if (enteringName) {
+      drawNameEntry();
+      return;
+    }
+
     ctx.fillStyle = win ? '#78e6aa' : '#ff8f6b';
     ctx.font = '28px Courier New';
     ctx.textAlign = 'center';
-    ctx.fillText(win ? 'GOAL REACHED' : 'CRASHED', W / 2, GAME_H / 2 - 10);
+    ctx.fillText(win ? 'GOAL REACHED' : 'CRASHED', W / 2, GAME_H / 2 - 150);
     ctx.font = '16px Courier New';
     ctx.fillStyle = '#cfd6de';
     const nextMsg = (win && level === 1)
@@ -1022,7 +1229,8 @@ function drawHUD() {
       : (win && level === 2)
       ? 'Time ' + elapsed.toFixed(1) + 's — click for LEVEL 3'
       : 'Time ' + elapsed.toFixed(1) + 's — click for a new field';
-    ctx.fillText(nextMsg, W / 2, GAME_H / 2 + 20);
+    ctx.fillText(nextMsg, W / 2, GAME_H / 2 - 118);
+    drawLeaderboard(level, W / 2, GAME_H / 2 - 70);
     ctx.textAlign = 'left';
   }
 }
@@ -1040,7 +1248,8 @@ function render() {
   } else {
     drawTitle();
   }
-  if (level === 1) drawPanelLevel1();
+  if (enteringName) drawEntryPanel();
+  else if (level === 1) drawPanelLevel1();
   else if (level === 2) drawPanelLevel2();
   else drawPanelLevel3();
   updateHintText();

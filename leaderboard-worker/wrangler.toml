@@ -1,0 +1,11 @@
+# Optional: only needed if you deploy with the Wrangler CLI instead of the
+# Cloudflare dashboard. The dashboard route in ../SETUP-LEADERBOARD.md needs none
+# of this. To use the CLI: create the KV namespace, paste its id below, uncomment
+# the block, then run `wrangler deploy`.
+name = "cvsc-leaderboard"
+main = "worker.js"
+compatibility_date = "2024-11-01"
+
+# [[kv_namespaces]]
+# binding = "SCORES"
+# id = "REPLACE_WITH_KV_NAMESPACE_ID"

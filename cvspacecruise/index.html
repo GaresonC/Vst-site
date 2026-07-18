@@ -354,9 +354,15 @@ let finished = null; // null | 'crashed' | 'goal'
 let elapsed = 0;
 let lastTime = performance.now();
 
-// ---------- Leaderboard (per-level arcade high scores, saved in localStorage) ----------
+// ---------- Leaderboard (per-level high scores, shared via a Cloudflare Worker) ----------
+// Scores live in a Worker + KV so every visitor shares one board. Until the worker
+// URL below is filled in — or whenever it can't be reached — the game falls back to a
+// board saved only in this browser, so it always works offline.
 const LB_KEY = 'cvSpaceCruiseScores';
-const LB_SIZE = 5; // top times kept per level
+const LB_SIZE = 5;   // top times kept per level
+const LB_API = '';   // e.g. 'https://cvsc-leaderboard.YOUR-NAME.workers.dev' — no trailing slash
+let boardsAreGlobal = false; // true once the worker has answered at least once
+let lastFetch = 0;           // throttles GET refreshes
 let enteringName = false;         // true while the player is patching in their initials
 let entryInitials = ['A', 'A', 'A'];
 let entryTime = 0;                // the run time being recorded
@@ -375,26 +381,55 @@ const entryJacks = {
   enter: { x: 1180, y: PANEL_Y0 + 160, r: 13, label: 'SAVE' },
 };
 
-function loadBoards() {
+function localBoards() {
   try { return JSON.parse(localStorage.getItem(LB_KEY)) || {}; }
   catch (e) { return {}; }
 }
+function saveLocal(all) {
+  try { localStorage.setItem(LB_KEY, JSON.stringify(all)); } catch (e) {}
+}
+
+// in-memory board cache, seeded from this browser and refreshed from the worker
+let boards = localBoards();
+
 function getBoard(lvl) {
-  const all = loadBoards();
-  return (all[lvl] || []).slice().sort((a, b) => a.t - b.t).slice(0, LB_SIZE);
+  return (boards[lvl] || []).slice().sort((a, b) => a.t - b.t).slice(0, LB_SIZE);
 }
 // a time earns a spot if the board isn't full or it beats the current slowest
 function qualifies(lvl, t) {
   const board = getBoard(lvl);
   return board.length < LB_SIZE || t < board[board.length - 1].t;
 }
+
+// pull the shared boards from the worker (throttled); a no-op in offline mode
+function fetchBoards(force) {
+  if (!LB_API) return;
+  const now = Date.now();
+  if (!force && now - lastFetch < 8000) return;
+  lastFetch = now;
+  fetch(LB_API + '/scores')
+    .then(r => (r.ok ? r.json() : null))
+    .then(data => { if (data) { boards = data; boardsAreGlobal = true; saveLocal(boards); } })
+    .catch(() => {});
+}
+
 function addScore(lvl, initials, t) {
-  const all = loadBoards();
-  const arr = (all[lvl] || []).concat([{ n: initials, t: t }]);
+  // optimistic local insert so the board updates instantly...
+  const arr = (boards[lvl] || []).concat([{ n: initials, t: t }]);
   arr.sort((a, b) => a.t - b.t);
-  all[lvl] = arr.slice(0, LB_SIZE);
-  try { localStorage.setItem(LB_KEY, JSON.stringify(all)); } catch (e) {}
+  boards[lvl] = arr.slice(0, LB_SIZE);
+  saveLocal(boards);
   lastEntry = { lvl: lvl, n: initials, t: t };
+  // ...then push to the worker and reconcile with its authoritative reply
+  if (LB_API) {
+    fetch(LB_API + '/scores', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ level: lvl, name: initials, time: t }),
+    }).then(r => (r.ok ? r.json() : null))
+      .then(data => { if (data) { boards = data; boardsAreGlobal = true; saveLocal(boards); } })
+      .catch(() => {});
+  }
 }
 
 // called the moment a run is won; opens initials entry if the time makes the board
@@ -421,6 +456,7 @@ function restart() {
   else if (level === 2) resetLevel2Controls();
   else resetLevel3Controls();
   generateField();
+  fetchBoards(); // refresh the shared board at the start of each attempt
 }
 
 // ---------- Input handling ----------
@@ -1114,7 +1150,7 @@ function drawLeaderboard(lvl, cx, topY) {
   ctx.textAlign = 'center';
   ctx.font = '15px Courier New';
   ctx.fillStyle = '#8fa2b3';
-  ctx.fillText('— LEVEL ' + lvl + ' BEST TIMES —', cx, topY);
+  ctx.fillText('— LEVEL ' + lvl + ' ' + (boardsAreGlobal ? 'GLOBAL' : 'LOCAL') + ' BEST —', cx, topY);
 
   ctx.font = '16px Courier New';
   const rowH = 26;

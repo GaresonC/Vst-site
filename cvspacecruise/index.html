@@ -71,15 +71,16 @@
   <div id="levelTabs">
     <button id="lvl1Btn" class="lvlBtn">LEVEL 1</button>
     <button id="lvl2Btn" class="lvlBtn">LEVEL 2</button>
+    <button id="lvl3Btn" class="lvlBtn">LEVEL 3</button>
   </div>
   <p class="hint" id="hint">Drag the cable, steer the ship.</p>
-  <canvas id="game" width="1300" height="980"></canvas>
+  <canvas id="game" width="1500" height="1100"></canvas>
 </div>
 <script>
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
 const W = canvas.width, H = canvas.height;
-const GAME_H = 760;
+const GAME_H = 880;
 const PANEL_Y0 = GAME_H;
 const PANEL_H = H - GAME_H;
 
@@ -89,6 +90,7 @@ let level = 1;
 function updateLevelButtons() {
   document.getElementById('lvl1Btn').classList.toggle('active', level === 1);
   document.getElementById('lvl2Btn').classList.toggle('active', level === 2);
+  document.getElementById('lvl3Btn').classList.toggle('active', level === 3);
 }
 
 const HINT = 'Drag the cable, steer the ship.';
@@ -96,9 +98,10 @@ const HINT_NO_CABLE = HINT + ' (click and drag from OUT to get a cable)';
 
 // a cable is on screen while it's patched into a jack or held mid-drag
 function cableOnScreen() {
-  return level === 1
-    ? (connection !== null || dragging)
-    : (connection2 !== null || dragging2);
+  if (level === 1) return connection !== null || dragging;
+  if (level === 2) return connection2 !== null || dragging2;
+  // level 3 has both cables live
+  return connection !== null || dragging || connection2 !== null || dragging2;
 }
 
 let hintShown = null;
@@ -117,18 +120,25 @@ function setLevel(n) {
 
 document.getElementById('lvl1Btn').addEventListener('click', () => setLevel(1));
 document.getElementById('lvl2Btn').addEventListener('click', () => setLevel(2));
+document.getElementById('lvl3Btn').addEventListener('click', () => setLevel(3));
 
 // ---------- Jack layout (level 1: LFO) ----------
 const lfoOutJack = { x: 150, y: PANEL_Y0 + 160, r: 13 };
 const rateSlider = { x0: 60, x1: 240, y: PANEL_Y0 + 90, handle: 0.35 }; // handle: 0..1 position
 const RATE_MIN = 0.05, RATE_MAX = 1.0;
 
-// ---------- Jack layout (level 2: step buttons) ----------
+// ---------- Jack layout (level 2 + 3: step buttons) ----------
 // One module output; the + / − buttons raise/lower the single voltage it emits.
-const plusButton = { x0: 50, y0: PANEL_Y0 + 55, x1: 145, y1: PANEL_Y0 + 95 };
-const minusButton = { x0: 155, y0: PANEL_Y0 + 55, x1: 250, y1: PANEL_Y0 + 95 };
-const stepOutJack = { x: 205, y: PANEL_Y0 + 160, r: 13 };
+// In level 3 the sine module keeps the left slot, so the step module shifts right
+// by stepDX(). All step geometry is derived through accessors so hit-testing and
+// drawing stay in sync. In level 3 the step voltage is positive-only (stepMin 0).
 const STEP = 0.1;
+function stepDX() { return level === 3 ? 300 : 0; }
+function stepBoxX() { return 30 + stepDX(); }
+function stepMin() { return level === 3 ? 0 : -1; }
+function plusButton()  { const d = stepDX(); return { x0: 50 + d,  y0: PANEL_Y0 + 55, x1: 145 + d, y1: PANEL_Y0 + 95 }; }
+function minusButton() { const d = stepDX(); return { x0: 155 + d, y0: PANEL_Y0 + 55, x1: 250 + d, y1: PANEL_Y0 + 95 }; }
+function stepOutJack()  { const d = stepDX(); return { x: 205 + d, y: PANEL_Y0 + 160, r: 13 }; }
 
 // ---------- Shared input jacks ----------
 const inputJacks = {
@@ -190,16 +200,42 @@ function resetLevel2Controls() {
   dragging2 = false;
 }
 
+// level 3: both modules present, both cables start unpatched so the player works
+// out the pairing (sine → oscillating aim, positive-only step → steady thrust)
+function resetLevel3Controls() {
+  aimLR = 0;
+  connection = null;
+  dragging = false;
+  draggingRate = false;
+  stepVoltage = 0;
+  connection2 = null;
+  dragging2 = false;
+}
+
 // ---------- Asteroid field + goal (static layout, regenerated each run) ----------
 let asteroids = [];
 const goal = { x: W / 2, y: 70, r: 22 };
+// level 3 chains two goals: reach GOAL 1/2 to reveal GOAL 2/2 (the final one)
+const goal2 = { x: W / 2, y: 70, r: 22 };
+let goalStage = 1; // 1 = seeking first goal, 2 = seeking final goal (level 3 only)
+
+// goals spawn anywhere from the top edge (as the game originally did) down to the
+// middle of the field, for variety
+function randomGoalY() { return 65 + Math.random() * (GAME_H * 0.42 - 65); }
 
 function generateField() {
   goal.x = 110 + Math.random() * (W - 220);
-  goal.y = 65;
+  goal.y = randomGoalY();
+
+  // level 3's final goal: its own top-to-middle spawn, pushed to the far side
+  goal2.x = 110 + Math.random() * (W - 220);
+  goal2.y = randomGoalY();
+  if (Math.abs(goal2.x - goal.x) < 300) {
+    goal2.x = clamp(goal.x > W / 2 ? goal.x - 360 : goal.x + 360, 110, W - 110);
+  }
 
   asteroids = [];
-  const count = 26;
+  const count = 34;
   let attempts = 0;
   while (asteroids.length < count && attempts < 500) {
     attempts++;
@@ -209,6 +245,7 @@ function generateField() {
 
     if (dist(x, y, SHIP_START.x, SHIP_START.y) < r + 90) continue;
     if (dist(x, y, goal.x, goal.y) < r + 90) continue;
+    if (level === 3 && dist(x, y, goal2.x, goal2.y) < r + 90) continue;
 
     let overlaps = false;
     for (const a of asteroids) {
@@ -320,8 +357,11 @@ let lastTime = performance.now();
 function restart() {
   elapsed = 0;
   finished = null;
+  goalStage = 1;
   resetShip();
-  if (level === 1) resetLevel1Controls(); else resetLevel2Controls();
+  if (level === 1) resetLevel1Controls();
+  else if (level === 2) resetLevel2Controls();
+  else resetLevel3Controls();
   generateField();
 }
 
@@ -356,13 +396,16 @@ canvas.addEventListener('mousedown', (e) => {
   if (finished) {
     if (finished === 'goal' && level === 1) {
       setLevel(2);
+    } else if (finished === 'goal' && level === 2) {
+      setLevel(3);
     } else {
       restart();
     }
     return;
   }
 
-  if (level === 1) {
+  // sine-wave module is present in levels 1 and 3
+  if (level === 1 || level === 3) {
     // rate slider handle
     const handleX = rateSlider.x0 + rateSlider.handle * (rateSlider.x1 - rateSlider.x0);
     if (Math.abs(p.x - handleX) < 12 && Math.abs(p.y - rateSlider.y) < 12) {
@@ -385,19 +428,24 @@ canvas.addEventListener('mousedown', (e) => {
       connection = null;
       return;
     }
-  } else {
+  }
+
+  // step-control module is present in levels 2 and 3
+  if (level === 2 || level === 3) {
+    const plus = plusButton(), minus = minusButton(), soj = stepOutJack();
+
     // step buttons raise/lower the module's single output voltage
-    if (pointInRect(p, plusButton)) {
-      stepVoltage = clamp(stepVoltage + STEP, -1, 1);
+    if (pointInRect(p, plus)) {
+      stepVoltage = clamp(stepVoltage + STEP, stepMin(), 1);
       return;
     }
-    if (pointInRect(p, minusButton)) {
-      stepVoltage = clamp(stepVoltage - STEP, -1, 1);
+    if (pointInRect(p, minus)) {
+      stepVoltage = clamp(stepVoltage - STEP, stepMin(), 1);
       return;
     }
 
     // grab from the module out jack
-    if (dist(p.x, p.y, stepOutJack.x, stepOutJack.y) < stepOutJack.r + 6) {
+    if (dist(p.x, p.y, soj.x, soj.y) < soj.r + 6) {
       dragging2 = true;
       dragPos2 = p;
       connection2 = null; // picking up detaches current connection
@@ -416,19 +464,12 @@ canvas.addEventListener('mousedown', (e) => {
 
 canvas.addEventListener('mousemove', (e) => {
   const p = getMousePos(e);
-  if (level === 1) {
-    if (draggingRate) {
-      let t = (p.x - rateSlider.x0) / (rateSlider.x1 - rateSlider.x0);
-      rateSlider.handle = Math.max(0, Math.min(1, t));
-    }
-    if (dragging) {
-      dragPos = p;
-    }
-  } else {
-    if (dragging2) {
-      dragPos2 = p;
-    }
+  if (draggingRate) {
+    let t = (p.x - rateSlider.x0) / (rateSlider.x1 - rateSlider.x0);
+    rateSlider.handle = Math.max(0, Math.min(1, t));
   }
+  if (dragging) dragPos = p;
+  if (dragging2) dragPos2 = p;
 });
 
 window.addEventListener('mouseup', (e) => {
@@ -485,14 +526,17 @@ function applyForces(dt, aimVal, thrustMag) {
 }
 
 function updateWorldCommon(dt) {
-  // bounds — the hull is wider than it is tall, and sits off-centre vertically,
-  // so clamp against its real extents instead of one radius
+  // outer boundary is lethal — hitting a wall is a crash, so it can't be used as a
+  // backboard to line up on the goal. The hull is wider than it is tall and sits
+  // off-centre vertically, so test against its real extents rather than one radius.
   const k = hitScale();
   const halfW = 22.4 * k, topY = 19 * k, botY = 20.4 * k;
-  if (ship.x < halfW) { ship.x = halfW; ship.vx = Math.max(0, ship.vx); }
-  if (ship.x > W - halfW) { ship.x = W - halfW; ship.vx = Math.min(0, ship.vx); }
-  if (ship.y < topY) { ship.y = topY; ship.vy = Math.max(0, ship.vy); }
-  if (ship.y > GAME_H - botY) { ship.y = GAME_H - botY; ship.vy = Math.min(0, ship.vy); }
+  if (ship.x < halfW || ship.x > W - halfW || ship.y < topY || ship.y > GAME_H - botY) {
+    // pin the wreck at the wall so the crash reads, then end the run
+    ship.x = clamp(ship.x, halfW, W - halfW);
+    ship.y = clamp(ship.y, topY, GAME_H - botY);
+    finished = 'crashed';
+  }
 
   // asteroids (static field — just spin in place)
   for (const a of asteroids) {
@@ -506,8 +550,17 @@ function updateWorldCommon(dt) {
     }
   }
 
-  if (!finished && shipOverlaps(goal.x, goal.y, goal.r)) {
-    finished = 'goal';
+  if (!finished) {
+    if (level === 3) {
+      // first goal only advances the stage; the final goal ends the run
+      if (goalStage === 1) {
+        if (shipOverlaps(goal.x, goal.y, goal.r)) goalStage = 2;
+      } else if (shipOverlaps(goal2.x, goal2.y, goal2.r)) {
+        finished = 'goal';
+      }
+    } else if (shipOverlaps(goal.x, goal.y, goal.r)) {
+      finished = 'goal';
+    }
   }
 }
 
@@ -525,13 +578,28 @@ function step(dt) {
 
     applyForces(dt, aimLR, thrustMag);
     ship._lfoValue = lfoValue;
-  } else {
+  } else if (level === 2) {
     // single output voltage drives whichever input the one cable is patched to;
     // aim holds its last value when the cable moves away (same as level 1)
     if (connection2 === 'aimLR') aimLR = stepVoltage;
     const thrustMag = connection2 === 'thrust' ? stepVoltage : 0;
 
     applyForces(dt, aimLR, thrustMag);
+  } else {
+    // level 3: sine wave and (positive-only) step control are both live. Each
+    // cable drives its patched input; if both land on the same input the step
+    // control wins (evaluated last).
+    lfoPhase += currentRate() * dt * Math.PI * 2;
+    const lfoValue = Math.sin(lfoPhase);
+
+    let thrustMag = 0;
+    if (connection === 'aimLR') aimLR = lfoValue;
+    if (connection === 'thrust') thrustMag = lfoValue;
+    if (connection2 === 'aimLR') aimLR = stepVoltage;
+    if (connection2 === 'thrust') thrustMag = stepVoltage;
+
+    applyForces(dt, aimLR, thrustMag);
+    ship._lfoValue = lfoValue;
   }
 
   updateWorldCommon(dt);
@@ -617,25 +685,35 @@ function drawAsteroids() {
   }
 }
 
-function drawGoal() {
+function drawGoalRing(g, label) {
   const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 260);
   ctx.save();
   ctx.strokeStyle = `rgba(120, 230, 170, ${0.6 + 0.4 * pulse})`;
   ctx.lineWidth = 3;
   ctx.beginPath();
-  ctx.arc(goal.x, goal.y, goal.r + pulse * 4, 0, Math.PI * 2);
+  ctx.arc(g.x, g.y, g.r + pulse * 4, 0, Math.PI * 2);
   ctx.stroke();
   ctx.strokeStyle = '#78e6aa';
   ctx.lineWidth = 2;
   ctx.beginPath();
-  ctx.arc(goal.x, goal.y, goal.r, 0, Math.PI * 2);
+  ctx.arc(g.x, g.y, g.r, 0, Math.PI * 2);
   ctx.stroke();
   ctx.fillStyle = '#9fb3c8';
   ctx.font = '11px Courier New';
   ctx.textAlign = 'center';
-  ctx.fillText('GOAL', goal.x, goal.y - goal.r - 10);
+  ctx.fillText(label, g.x, g.y - g.r - 10);
   ctx.textAlign = 'left';
   ctx.restore();
+}
+
+// levels 1/2 have one plain goal; level 3 chains GOAL 1/2 → GOAL 2/2
+function drawGoals() {
+  if (level === 3) {
+    if (goalStage === 1) drawGoalRing(goal, 'GOAL 1/2');
+    else drawGoalRing(goal2, 'GOAL 2/2');
+  } else {
+    drawGoalRing(goal, 'GOAL');
+  }
 }
 
 function drawShip() {
@@ -771,8 +849,7 @@ function drawInputJacks(highlight) {
   }
 }
 
-function drawPanelLevel1() {
-  ctx.save();
+function drawPanelBase() {
   ctx.fillStyle = '#0c0f13';
   ctx.fillRect(0, PANEL_Y0, W, PANEL_H);
   ctx.strokeStyle = '#22282f';
@@ -780,8 +857,10 @@ function drawPanelLevel1() {
   ctx.moveTo(0, PANEL_Y0);
   ctx.lineTo(W, PANEL_Y0);
   ctx.stroke();
+}
 
-  // LFO module box
+// The sine-wave (LFO) module — fixed left slot, used by levels 1 and 3.
+function drawSineModuleUI() {
   ctx.strokeStyle = '#2a323b';
   ctx.strokeRect(30, PANEL_Y0 + 20, 240, PANEL_H - 40);
   ctx.fillStyle = '#8fa2b3';
@@ -808,73 +887,93 @@ function drawPanelLevel1() {
   drawJack(lfoOutJack, connection !== null || dragging);
   ctx.fillStyle = '#6d7885';
   ctx.fillText('OUT', lfoOutJack.x - 12, PANEL_Y0 + 195);
+}
 
-  // input jacks
+// The step-control module — position follows stepDX() (shifts right in level 3).
+function drawStepModuleUI() {
+  const bx = stepBoxX();
+  const soj = stepOutJack();
+
+  ctx.strokeStyle = '#2a323b';
+  ctx.strokeRect(bx, PANEL_Y0 + 20, 240, PANEL_H - 40);
+  ctx.fillStyle = '#8fa2b3';
+  ctx.font = '13px Courier New';
+  ctx.fillText('STEP CONTROL', bx + 15, PANEL_Y0 + 45);
+
+  drawStepButton(plusButton(), '+', false);
+  drawStepButton(minusButton(), '−', false);
+
+  // single voltage meter for the module's output, plus its readout
+  drawMeter(soj.x - 45, PANEL_Y0 + 190, stepVoltage, '');
+  ctx.fillStyle = '#6d7885';
+  ctx.font = '11px Courier New';
+  ctx.fillText(stepVoltage.toFixed(2) + ' V', bx + 15, PANEL_Y0 + 130);
+
+  // module out jack
+  drawJack(soj, connection2 !== null || dragging2);
+  ctx.fillStyle = '#6d7885';
+  ctx.fillText('OUT', soj.x - 12, soj.y + 28);
+}
+
+function drawSineCable() {
+  ctx.lineWidth = 4;
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = '#4a9dd6';
+  if (connection) drawCable(lfoOutJack.x, lfoOutJack.y, inputJacks[connection].x, inputJacks[connection].y);
+  if (dragging) drawCable(lfoOutJack.x, lfoOutJack.y, dragPos.x, dragPos.y);
+}
+
+function drawStepCable(color) {
+  const soj = stepOutJack();
+  ctx.lineWidth = 4;
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = color;
+  if (connection2) drawCable(soj.x, soj.y, inputJacks[connection2].x, inputJacks[connection2].y);
+  if (dragging2) drawCable(soj.x, soj.y, dragPos2.x, dragPos2.y);
+}
+
+function drawPanelLevel1() {
+  ctx.save();
+  drawPanelBase();
+  drawSineModuleUI();
+
   drawInputJacks((key) => connection === key);
   drawMeter(inputJacks.aimLR.x - 45, PANEL_Y0 + 190, aimLR, '');
   drawMeter(inputJacks.thrust.x - 45, PANEL_Y0 + 190, (connection === 'thrust' ? (ship._lfoValue || 0) : -1), '');
 
-  // cable
-  ctx.lineWidth = 4;
-  ctx.strokeStyle = '#4a9dd6';
-  ctx.lineCap = 'round';
-  if (connection) {
-    const j = inputJacks[connection];
-    drawCable(lfoOutJack.x, lfoOutJack.y, j.x, j.y);
-  }
-  if (dragging) {
-    drawCable(lfoOutJack.x, lfoOutJack.y, dragPos.x, dragPos.y);
-  }
-
+  drawSineCable();
   ctx.restore();
 }
 
 function drawPanelLevel2() {
   ctx.save();
-  ctx.fillStyle = '#0c0f13';
-  ctx.fillRect(0, PANEL_Y0, W, PANEL_H);
-  ctx.strokeStyle = '#22282f';
-  ctx.beginPath();
-  ctx.moveTo(0, PANEL_Y0);
-  ctx.lineTo(W, PANEL_Y0);
-  ctx.stroke();
-
-  // step control module box
-  ctx.strokeStyle = '#2a323b';
-  ctx.strokeRect(30, PANEL_Y0 + 20, 240, PANEL_H - 40);
-  ctx.fillStyle = '#8fa2b3';
-  ctx.font = '13px Courier New';
-  ctx.fillText('STEP CONTROL', 45, PANEL_Y0 + 45);
-
-  drawStepButton(plusButton, '+', false);
-  drawStepButton(minusButton, '−', false);
-
-  // single voltage meter for the module's output, plus its readout
-  drawMeter(stepOutJack.x - 45, PANEL_Y0 + 190, stepVoltage, '');
-  ctx.fillStyle = '#6d7885';
-  ctx.font = '11px Courier New';
-  ctx.fillText(stepVoltage.toFixed(2) + ' V', 45, PANEL_Y0 + 130);
-
-  // module out jack
-  drawJack(stepOutJack, connection2 !== null || dragging2);
-  ctx.fillStyle = '#6d7885';
-  ctx.fillText('OUT', stepOutJack.x - 12, stepOutJack.y + 28);
+  drawPanelBase();
+  drawStepModuleUI();
 
   // input jacks (no per-input meters now)
   drawInputJacks((key) => connection2 === key);
 
-  // single cable
-  ctx.lineWidth = 4;
-  ctx.lineCap = 'round';
-  ctx.strokeStyle = '#4a9dd6';
-  if (connection2) {
-    const j = inputJacks[connection2];
-    drawCable(stepOutJack.x, stepOutJack.y, j.x, j.y);
-  }
-  if (dragging2) {
-    drawCable(stepOutJack.x, stepOutJack.y, dragPos2.x, dragPos2.y);
-  }
+  drawStepCable('#4a9dd6');
+  ctx.restore();
+}
 
+function drawPanelLevel3() {
+  ctx.save();
+  drawPanelBase();
+  drawSineModuleUI();
+  drawStepModuleUI();
+
+  // both cables can be patched, so a jack is lit if either module feeds it
+  drawInputJacks((key) => connection === key || connection2 === key);
+  drawMeter(inputJacks.aimLR.x - 45, PANEL_Y0 + 190, aimLR, '');
+  const thrustLevel = connection2 === 'thrust' ? stepVoltage
+                    : connection === 'thrust' ? (ship._lfoValue || 0)
+                    : -1;
+  drawMeter(inputJacks.thrust.x - 45, PANEL_Y0 + 190, thrustLevel, '');
+
+  // distinct cable colours so the two patches are easy to tell apart
+  drawSineCable();          // blue = sine wave
+  drawStepCable('#d6a84a'); // amber = step control
   ctx.restore();
 }
 
@@ -920,6 +1019,8 @@ function drawHUD() {
     ctx.fillStyle = '#cfd6de';
     const nextMsg = (win && level === 1)
       ? 'Time ' + elapsed.toFixed(1) + 's — click for LEVEL 2'
+      : (win && level === 2)
+      ? 'Time ' + elapsed.toFixed(1) + 's — click for LEVEL 3'
       : 'Time ' + elapsed.toFixed(1) + 's — click for a new field';
     ctx.fillText(nextMsg, W / 2, GAME_H / 2 + 20);
     ctx.textAlign = 'left';
@@ -932,14 +1033,16 @@ function render() {
   ctx.fillRect(0, 0, W, GAME_H);
   if (started) {
     drawBackground();
-    drawGoal();
+    drawGoals();
     drawAsteroids();
     drawShip();
     drawHUD();
   } else {
     drawTitle();
   }
-  if (level === 1) drawPanelLevel1(); else drawPanelLevel2();
+  if (level === 1) drawPanelLevel1();
+  else if (level === 2) drawPanelLevel2();
+  else drawPanelLevel3();
   updateHintText();
 }
 
